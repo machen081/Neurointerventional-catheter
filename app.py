@@ -1,5 +1,6 @@
 import streamlit as st
 import matplotlib.pyplot as plt
+import pandas as pd
 import numpy as np
 
 st.set_page_config(page_title="微导管多层刚度计算器", layout="wide")
