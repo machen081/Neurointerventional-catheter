@@ -252,7 +252,7 @@ else:
     col2.metric("Total Bending Stiffness EI", f"{EI_total:.2f} N·mm²")
     col3.metric("Total Crush Stiffness Kp", f"{Kp_total:.2f} N/mm")
 
-    # 截面图（从外向内绘制，避免覆盖）
+    # 截面图（从外向内绘制，编织层带网格线）
     st.subheader("Cross-section View")
     fig_cross, ax_cross = plt.subplots(figsize=(5, 5))
     colors = plt.cm.tab10(np.linspace(0, 1, len(layers)))
@@ -262,8 +262,13 @@ else:
         layer = layers[i]
         r_in = layer['r_in']
         r_out = layer['r_out']
+        # 填充环
         ax_cross.add_patch(plt.Circle((0, 0), r_out, color=colors[i], alpha=0.6))
         ax_cross.add_patch(plt.Circle((0, 0), r_in, color='white', fill=True))
+        # 如果是编织层，添加网格线
+        if layer.get('layer_type') == '编织层':
+            ax_cross.add_patch(plt.Wedge((0, 0), r_out, 0, 360, width=r_out - r_in,
+                                         fill=False, hatch='///', edgecolor='none'))
 
     # 最内腔（如果内半径大于0）
     if layers[0]['r_in'] > 0:
@@ -281,7 +286,7 @@ else:
     ax_cross.axis('off')
     st.pyplot(fig_cross)
 
-    # 计算百分比（数值，用于条形图）
+    # 计算百分比（数值，用于条形图和表格）
     if EA_total > 0:
         ea_pct_vals = [val / EA_total * 100 for val in EA_contrib]
     else:
