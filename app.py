@@ -32,15 +32,11 @@ def compute_layer_contributions(layers):
         r_in = layer['r_in']
         r_out = layer['r_out']
         E_z = layer['E_z']
-        # 轴向刚度贡献
         EA_i = np.pi * E_z * (r_out**2 - r_in**2)
-        # 弯曲刚度贡献
         EI_i = (np.pi / 4) * E_z * (r_out**4 - r_in**4)
-        # 抗压扁刚度贡献（这里采用简化：将总 EI 按比例分配？实际上 Kp 由总 EI 和 R 决定，无法逐层简单分解。
-        # 为展示各层对 Kp 的贡献，我们定义每层对 Kp 的贡献等于该层 EI 占总 EI 的比例乘以总 Kp。
         EA_contrib.append(EA_i)
         EI_contrib.append(EI_i)
-        Kp_contrib.append(0.0)  # 先占位，后面计算总 Kp 后按比例分配
+        Kp_contrib.append(0.0)
 
     EA_total = sum(EA_contrib)
     EI_total = sum(EI_contrib)
@@ -49,7 +45,6 @@ def compute_layer_contributions(layers):
         rn = layers[-1]['r_out']
         R = (r0 + rn) / 2
         Kp_total = EI_total / (R**3 * (np.pi/2 - 4/np.pi))
-        # 按 EI 比例分配 Kp 贡献
         if EI_total > 0:
             Kp_contrib = [ei / EI_total * Kp_total for ei in EI_contrib]
         else:
@@ -66,7 +61,7 @@ def create_default_layers():
         {"layer_type": "编织层", "r_in": 0.45, "r_out": 0.50,
          "d_w": 0.02, "alpha": 45.0, "PPI": 80,
          "E_f": 200000, "E_m": 30,
-         "E_z": None},  # 计算时更新
+         "E_z": None},
         {"layer_type": "普通材料", "r_in": 0.50, "r_out": 0.60,
          "material": "Pebax 7233", "E_z": 50},
     ]
@@ -100,7 +95,6 @@ with st.sidebar:
     n_layers = st.number_input("总层数", min_value=1, max_value=10,
                                value=len(st.session_state.layers), step=1,
                                key="n_layers_input")
-    # 调整层数
     if n_layers != len(st.session_state.layers):
         if n_layers > len(st.session_state.layers):
             for _ in range(n_layers - len(st.session_state.layers)):
@@ -116,12 +110,10 @@ with st.sidebar:
             st.session_state.layers = st.session_state.layers[:n_layers]
         st.rerun()
 
-    # 逐层编辑
     layers_to_save = []
     valid = True
     for i, layer in enumerate(st.session_state.layers):
         with st.expander(f"第 {i+1} 层", expanded=(i == 0)):
-            # 层类型
             layer_type = st.radio(
                 "层类型",
                 ["普通材料", "编织层"],
@@ -161,15 +153,26 @@ with st.sidebar:
                 )
                 layer['material'] = material
                 default_E = material_library[material] if material != "自定义" else 0.0
+
+                # 动态更新模量值
+                Ez_key = f"layer_{i}_Ez"
+                prev_material_key = f"layer_{i}_material_prev"
+                if Ez_key not in st.session_state:
+                    st.session_state[Ez_key] = float(layer.get('E_z', default_E))
+                    st.session_state[prev_material_key] = material
+                elif st.session_state.get(prev_material_key) != material:
+                    st.session_state[Ez_key] = default_E
+                    st.session_state[prev_material_key] = material
+
                 E_z = st.number_input(
                     "轴向模量 (MPa)",
-                    value=float(layer.get('E_z', default_E)),
-                    step=100.0, format="%.1f",
-                    key=f"layer_{i}_Ez"
+                    key=Ez_key,
+                    step=100.0,
+                    format="%.1f"
                 )
                 layer['E_z'] = E_z
 
-            else:  # 编织层
+            else:
                 col_d1, col_d2 = st.columns(2)
                 with col_d1:
                     d_w = st.number_input(
@@ -208,19 +211,15 @@ with st.sidebar:
                 layer['PPI'] = PPI
                 layer['E_f'] = E_f
                 layer['E_m'] = E_m
-                # 计算等效轴向模量
                 Ez_calc = update_braid_Ez(layer)
                 layer['E_z'] = Ez_calc
                 st.success(f"编织层等效轴向模量 E_z = {Ez_calc:.1f} MPa")
 
-            # 保存该层
             layers_to_save.append(layer)
 
-    # 检查半径连续性
     for i in range(1, len(layers_to_save)):
         if abs(layers_to_save[i]['r_in'] - layers_to_save[i-1]['r_out']) > 1e-6:
             st.warning(f"第 {i+1} 层内半径 ({layers_to_save[i]['r_in']}) 与第 {i} 层外半径 ({layers_to_save[i-1]['r_out']}) 不一致")
-            # 仅警告，不强制
 
     if st.button("保存修改", type="primary"):
         if valid:
@@ -235,54 +234,106 @@ with st.sidebar:
         st.rerun()
 
 # ==================== 主区域 ====================
-st.header("各层刚度贡献叠加图")
+st.header("Cross-section Multi-layer Stiffness Analysis")
 
 if not st.session_state.layers:
-    st.info("请在左侧定义至少一层")
+    st.info("Please define at least one layer in the sidebar.")
 else:
     layers = st.session_state.layers
     try:
         EA_total, EI_total, Kp_total, EA_contrib, EI_contrib, Kp_contrib = compute_layer_contributions(layers)
     except Exception as e:
-        st.error(f"计算错误：{e}")
+        st.error(f"Calculation error: {e}")
         st.stop()
 
-    # 显示总刚度
+    # 显示总刚度（英文标签）
     col1, col2, col3 = st.columns(3)
-    col1.metric("总轴向刚度 EA", f"{EA_total:.2f} N")
-    col2.metric("总弯曲刚度 EI", f"{EI_total:.2f} N·mm²")
-    col3.metric("总抗压扁刚度 Kp", f"{Kp_total:.2f} N/mm")
+    col1.metric("Total Axial Stiffness EA", f"{EA_total:.2f} N")
+    col2.metric("Total Bending Stiffness EI", f"{EI_total:.2f} N·mm²")
+    col3.metric("Total Crush Stiffness Kp", f"{Kp_total:.2f} N/mm")
 
-    # 绘制堆叠条形图
-    layer_labels = [f"Layer {i+1}" for i in range(len(layers))]
+    # 截面图（从外向内绘制，避免覆盖）
+    st.subheader("Cross-section View")
+    fig_cross, ax_cross = plt.subplots(figsize=(5, 5))
     colors = plt.cm.tab10(np.linspace(0, 1, len(layers)))
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 6))
-    fig.suptitle("各层对刚度的贡献", y=1.02, fontsize=14)
+    # 从外向内绘制各层
+    for i in reversed(range(len(layers))):
+        layer = layers[i]
+        r_in = layer['r_in']
+        r_out = layer['r_out']
+        ax_cross.add_patch(plt.Circle((0, 0), r_out, color=colors[i], alpha=0.6))
+        ax_cross.add_patch(plt.Circle((0, 0), r_in, color='white', fill=True))
 
-    # EA 堆叠图
-    axes[0].bar(layer_labels, EA_contrib, color=colors)
-    axes[0].set_title('Axial Stiffness (EA)', fontsize=12)
-    axes[0].set_ylabel('N')
-    axes[0].grid(axis='y', linestyle='--', alpha=0.7)
+    # 最内腔（如果内半径大于0）
+    if layers[0]['r_in'] > 0:
+        ax_cross.add_patch(plt.Circle((0, 0), layers[0]['r_in'], color='white', fill=True))
 
-    # EI 堆叠图
-    axes[1].bar(layer_labels, EI_contrib, color=colors)
-    axes[1].set_title('Bending Stiffness (EI)', fontsize=12)
-    axes[1].set_ylabel('N·mm²')
-    axes[1].grid(axis='y', linestyle='--', alpha=0.7)
+    # 添加层号标注
+    for i, layer in enumerate(layers):
+        r_mid = (layer['r_in'] + layer['r_out']) / 2
+        ax_cross.text(0, r_mid, f"L{i+1}", ha='center', va='center', fontsize=9,
+                      color='black', bbox=dict(facecolor='white', alpha=0.5, edgecolor='none'))
 
-    # Kp 堆叠图
-    axes[2].bar(layer_labels, Kp_contrib, color=colors)
-    axes[2].set_title('Crush Stiffness (Kp)', fontsize=12)
-    axes[2].set_ylabel('N/mm')
-    axes[2].grid(axis='y', linestyle='--', alpha=0.7)
+    ax_cross.set_xlim(-layers[-1]['r_out'] * 1.2, layers[-1]['r_out'] * 1.2)
+    ax_cross.set_ylim(-layers[-1]['r_out'] * 1.2, layers[-1]['r_out'] * 1.2)
+    ax_cross.set_aspect('equal')
+    ax_cross.axis('off')
+    st.pyplot(fig_cross)
 
-    # 调整布局
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
-    st.pyplot(fig)
+    # 计算百分比（数值，用于条形图）
+    if EA_total > 0:
+        ea_pct_vals = [val / EA_total * 100 for val in EA_contrib]
+    else:
+        ea_pct_vals = [0.0] * len(layers)
+    if EI_total > 0:
+        ei_pct_vals = [val / EI_total * 100 for val in EI_contrib]
+    else:
+        ei_pct_vals = [0.0] * len(layers)
+    if Kp_total > 0:
+        kp_pct_vals = [val / Kp_total * 100 for val in Kp_contrib]
+    else:
+        kp_pct_vals = [0.0] * len(layers)
 
-    # 显示层参数表
-    st.subheader("层参数明细")
+    # 条形图：各层贡献百分比
+    st.subheader("Layer Contributions (%) - Bar Chart")
+    layer_labels = [f"L{i+1}" for i in range(len(layers))]
+    fig_bar, axes_bar = plt.subplots(1, 3, figsize=(15, 5))
+    fig_bar.suptitle("Layer Contributions to Stiffness (%)", y=1.02, fontsize=14)
+
+    axes_bar[0].bar(layer_labels, ea_pct_vals, color=colors)
+    axes_bar[0].set_title('Axial Stiffness (EA) %', fontsize=12)
+    axes_bar[0].set_ylabel('Contribution (%)', fontsize=10)
+    axes_bar[0].grid(axis='y', linestyle='--', alpha=0.7)
+
+    axes_bar[1].bar(layer_labels, ei_pct_vals, color=colors)
+    axes_bar[1].set_title('Bending Stiffness (EI) %', fontsize=12)
+    axes_bar[1].set_ylabel('Contribution (%)', fontsize=10)
+    axes_bar[1].grid(axis='y', linestyle='--', alpha=0.7)
+
+    axes_bar[2].bar(layer_labels, kp_pct_vals, color=colors)
+    axes_bar[2].set_title('Crush Stiffness (Kp) %', fontsize=12)
+    axes_bar[2].set_ylabel('Contribution (%)', fontsize=10)
+    axes_bar[2].grid(axis='y', linestyle='--', alpha=0.7)
+
+    fig_bar.tight_layout(rect=[0, 0, 1, 0.95])
+    st.pyplot(fig_bar)
+
+    # 百分比表格
+    st.subheader("Layer Contributions (%)")
+    ea_pct_str = [f"{val:.2f}%" for val in ea_pct_vals]
+    ei_pct_str = [f"{val:.2f}%" for val in ei_pct_vals]
+    kp_pct_str = [f"{val:.2f}%" for val in kp_pct_vals]
+
+    contrib_df = pd.DataFrame({
+        "Layer": layer_labels,
+        "EA (%)": ea_pct_str,
+        "EI (%)": ei_pct_str,
+        "Kp (%)": kp_pct_str
+    })
+    st.dataframe(contrib_df, use_container_width=True)
+
+    # 层参数表
+    st.subheader("Layer Parameters")
     df = pd.DataFrame(layers)
     st.dataframe(df, use_container_width=True)
