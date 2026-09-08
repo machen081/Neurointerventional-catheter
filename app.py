@@ -23,10 +23,14 @@ material_library = {
     "钴铬合金": 220000,
 }
 
-# ==================== 计算函数（增加 x_pos 参数，只考虑覆盖该位置的层） ====================
+# ==================== 计算函数（单点） ====================
 def compute_layer_contributions(layers, x_pos):
-    # 过滤出在 x_pos 处存在的层
-    active_layers = [layer for layer in layers if layer['start_x'] <= x_pos <= layer['end_x']]
+    active_layers = []
+    active_indices = []
+    for idx, layer in enumerate(layers):
+        if layer['start_x'] <= x_pos <= layer['end_x']:
+            active_layers.append(layer)
+            active_indices.append(idx)
 
     EA_contrib, EI_contrib, Kp_contrib = [], [], []
     for layer in active_layers:
@@ -51,9 +55,22 @@ def compute_layer_contributions(layers, x_pos):
     else:
         Kp_total = 0.0
 
-    return EA_total, EI_total, Kp_total, EA_contrib, EI_contrib, Kp_contrib, active_layers
+    return EA_total, EI_total, Kp_total, EA_contrib, EI_contrib, Kp_contrib, active_layers, active_indices
 
-# ==================== 默认层数据（添加 start_x, end_x） ====================
+# ==================== 新增：沿长度计算刚度曲线 ====================
+def compute_stiffness_along_length(layers, L_total, n_points=500):
+    x_vals = np.linspace(0, L_total, n_points)
+    EA_arr = np.zeros(n_points)
+    EI_arr = np.zeros(n_points)
+    Kp_arr = np.zeros(n_points)
+    for i, x in enumerate(x_vals):
+        EA, EI, Kp, _, _, _, _, _ = compute_layer_contributions(layers, x)
+        EA_arr[i] = EA
+        EI_arr[i] = EI
+        Kp_arr[i] = Kp
+    return x_vals, EA_arr, EI_arr, Kp_arr
+
+# ==================== 默认层数据 ====================
 def create_default_layers():
     return [
         {"layer_type": "普通材料", "r_in": 0.40, "r_out": 0.45,
@@ -88,7 +105,6 @@ if 'x_pos' not in st.session_state:
 with st.sidebar:
     st.header("截面层结构定义")
 
-    # 导管总长度
     L_total = st.number_input("导管总长度 (mm)", min_value=1.0,
                               value=st.session_state.L_total, step=10.0,
                               key="L_total_input")
@@ -136,7 +152,6 @@ with st.sidebar:
                 valid = False
             layer['r_in'], layer['r_out'] = r_in, r_out
 
-            # 新增：轴向起止坐标
             col3, col4 = st.columns(2)
             with col3:
                 start_x = st.number_input("开始坐标 (mm)", value=float(layer.get('start_x', 0.0)),
@@ -193,8 +208,6 @@ with st.sidebar:
 
             layers_to_save.append(layer)
 
-    # 检查层间连续性（径向，仅在同一轴向范围内检查）
-    # 由于轴向范围可能不同，此处只做简单提醒，不强制
     for i in range(1, len(layers_to_save)):
         if abs(layers_to_save[i]['r_in'] - layers_to_save[i-1]['r_out']) > 1e-6:
             st.warning(f"第 {i+1} 层内半径与上一层外半径不一致（可能在轴向上不同段可忽略）")
@@ -222,6 +235,37 @@ else:
     layers = st.session_state.layers
     L_total = st.session_state.L_total
 
+    # 计算沿长度刚度曲线
+    x_vals, EA_curve, EI_curve, Kp_curve = compute_stiffness_along_length(layers, L_total)
+
+    # 绘制沿轴向的三个刚度曲线图
+    st.subheader("Stiffness along Catheter Length")
+    fig_curve, axes_curve = plt.subplots(3, 1, figsize=(10, 12))
+    fig_curve.suptitle("Stiffness Distribution along Length", y=0.98, fontsize=14)
+
+    axes_curve[0].plot(x_vals, EA_curve, 'b-', linewidth=2)
+    axes_curve[0].set_ylabel('Axial Stiffness EA (N)', fontsize=10)
+    axes_curve[0].grid(True)
+    axes_curve[0].set_title('Axial Stiffness', fontsize=12)
+
+    axes_curve[1].plot(x_vals, EI_curve, 'g-', linewidth=2)
+    axes_curve[1].set_ylabel('Bending Stiffness EI (N·mm²)', fontsize=10)
+    axes_curve[1].grid(True)
+    axes_curve[1].set_title('Bending Stiffness', fontsize=12)
+
+    axes_curve[2].plot(x_vals, Kp_curve, 'r-', linewidth=2)
+    axes_curve[2].set_xlabel('Axial position (mm)', fontsize=10)
+    axes_curve[2].set_ylabel('Crush Stiffness Kp (N/mm)', fontsize=10)
+    axes_curve[2].grid(True)
+    axes_curve[2].set_title('Crush Stiffness', fontsize=12)
+
+    # 标记当前滑块位置
+    for ax in axes_curve:
+        ax.axvline(x=st.session_state.x_pos, color='gray', linestyle='--', alpha=0.5)
+
+    fig_curve.tight_layout(rect=[0, 0, 1, 0.95])
+    st.pyplot(fig_curve)
+
     # 轴向位置选择器
     st.subheader("Select Axial Position")
     x_pos = st.slider("Axial position x (mm)", min_value=0.0,
@@ -230,7 +274,7 @@ else:
     st.session_state.x_pos = x_pos
 
     try:
-        EA_total, EI_total, Kp_total, EA_contrib, EI_contrib, Kp_contrib, active_layers = compute_layer_contributions(layers, x_pos)
+        EA_total, EI_total, Kp_total, EA_contrib, EI_contrib, Kp_contrib, active_layers, active_indices = compute_layer_contributions(layers, x_pos)
     except Exception as e:
         st.error(f"计算错误: {e}")
         st.stop()
@@ -250,11 +294,10 @@ else:
     fig, ax = plt.subplots(figsize=(5, 5))
     colors = plt.cm.tab10(np.linspace(0, 1, len(active_layers)))
 
-    # 从外向内绘制
-    for idx in reversed(range(len(active_layers))):
-        layer = active_layers[idx]
+    for i in reversed(range(len(active_layers))):
+        layer = active_layers[i]
         r_in, r_out = layer['r_in'], layer['r_out']
-        ax.add_patch(plt.Circle((0, 0), r_out, color=colors[idx], alpha=0.6))
+        ax.add_patch(plt.Circle((0, 0), r_out, color=colors[i], alpha=0.6))
         ax.add_patch(plt.Circle((0, 0), r_in, color='white', fill=True))
         if layer.get('layer_type') == '编织层':
             ax.add_patch(mpatches.Wedge((0, 0), r_out, 0, 360,
@@ -264,10 +307,10 @@ else:
     if active_layers[0]['r_in'] > 0:
         ax.add_patch(plt.Circle((0, 0), active_layers[0]['r_in'], color='white', fill=True))
 
-    # 标注层号
     for i, layer in enumerate(active_layers):
         r_mid = (layer['r_in'] + layer['r_out']) / 2
-        ax.text(0, r_mid, f"L{i+1}", ha='center', va='center', fontsize=9,
+        global_idx = active_indices[i]
+        ax.text(0, r_mid, f"L{global_idx+1}", ha='center', va='center', fontsize=9,
                 bbox=dict(facecolor='white', alpha=0.5, edgecolor='none'))
 
     ax.set_xlim(-active_layers[-1]['r_out']*1.2, active_layers[-1]['r_out']*1.2)
@@ -283,24 +326,24 @@ else:
 
     # 条形图
     st.subheader("Layer Contributions (%) - Bar Chart")
-    labels = [f"L{i+1}" for i in range(len(active_layers))]
-    fig_bar, axes = plt.subplots(1, 3, figsize=(15, 5))
+    labels = [f"L{active_indices[i]+1}" for i in range(len(active_layers))]
+    fig_bar, axes_bar = plt.subplots(1, 3, figsize=(15, 5))
     fig_bar.suptitle("Layer Contributions to Stiffness (%)", y=1.02, fontsize=14)
 
-    axes[0].bar(labels, ea_pct, color=colors)
-    axes[0].set_title('Axial Stiffness (EA) %')
-    axes[0].set_ylabel('Contribution (%)')
-    axes[0].grid(axis='y', linestyle='--', alpha=0.7)
+    axes_bar[0].bar(labels, ea_pct, color=colors)
+    axes_bar[0].set_title('Axial Stiffness (EA) %')
+    axes_bar[0].set_ylabel('Contribution (%)')
+    axes_bar[0].grid(axis='y', linestyle='--', alpha=0.7)
 
-    axes[1].bar(labels, ei_pct, color=colors)
-    axes[1].set_title('Bending Stiffness (EI) %')
-    axes[1].set_ylabel('Contribution (%)')
-    axes[1].grid(axis='y', linestyle='--', alpha=0.7)
+    axes_bar[1].bar(labels, ei_pct, color=colors)
+    axes_bar[1].set_title('Bending Stiffness (EI) %')
+    axes_bar[1].set_ylabel('Contribution (%)')
+    axes_bar[1].grid(axis='y', linestyle='--', alpha=0.7)
 
-    axes[2].bar(labels, kp_pct, color=colors)
-    axes[2].set_title('Crush Stiffness (Kp) %')
-    axes[2].set_ylabel('Contribution (%)')
-    axes[2].grid(axis='y', linestyle='--', alpha=0.7)
+    axes_bar[2].bar(labels, kp_pct, color=colors)
+    axes_bar[2].set_title('Crush Stiffness (Kp) %')
+    axes_bar[2].set_ylabel('Contribution (%)')
+    axes_bar[2].grid(axis='y', linestyle='--', alpha=0.7)
 
     fig_bar.tight_layout(rect=[0, 0, 1, 0.95])
     st.pyplot(fig_bar)
@@ -320,8 +363,8 @@ else:
     all_keys = ['layer_type', 'r_in', 'r_out', 'material', 'E_z',
                 'd_w', 'alpha', 'PPI', 'E_f', 'E_m', 'start_x', 'end_x']
     df_rows = []
-    for layer in layers:  # 注意：这里显示全部层，而不仅仅是 active_layers
-        row = {}
+    for idx, layer in enumerate(layers):
+        row = {"Layer": f"L{idx+1}"}
         for k in all_keys:
             row[k] = layer.get(k, None)
         df_rows.append(row)
