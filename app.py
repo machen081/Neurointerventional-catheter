@@ -23,10 +23,13 @@ material_library = {
     "钴铬合金": 220000,
 }
 
-# ==================== 计算函数 ====================
-def compute_layer_contributions(layers):
+# ==================== 计算函数（增加 x_pos 参数，只考虑覆盖该位置的层） ====================
+def compute_layer_contributions(layers, x_pos):
+    # 过滤出在 x_pos 处存在的层
+    active_layers = [layer for layer in layers if layer['start_x'] <= x_pos <= layer['end_x']]
+
     EA_contrib, EI_contrib, Kp_contrib = [], [], []
-    for layer in layers:
+    for layer in active_layers:
         r_in, r_out, E_z = layer['r_in'], layer['r_out'], layer['E_z']
         EA_i = np.pi * E_z * (r_out**2 - r_in**2)
         EI_i = (np.pi / 4) * E_z * (r_out**4 - r_in**4)
@@ -36,29 +39,31 @@ def compute_layer_contributions(layers):
 
     EA_total = sum(EA_contrib)
     EI_total = sum(EI_contrib)
-    if layers:
-        r0 = layers[0]['r_in']
-        rn = layers[-1]['r_out']
+    if active_layers:
+        r0 = active_layers[0]['r_in']
+        rn = active_layers[-1]['r_out']
         R = (r0 + rn) / 2
         Kp_total = EI_total / (R**3 * (np.pi/2 - 4/np.pi))
         if EI_total > 0:
             Kp_contrib = [ei / EI_total * Kp_total for ei in EI_contrib]
         else:
-            Kp_contrib = [0.0] * len(layers)
+            Kp_contrib = [0.0] * len(active_layers)
     else:
         Kp_total = 0.0
-    return EA_total, EI_total, Kp_total, EA_contrib, EI_contrib, Kp_contrib
 
-# ==================== 默认层数据 ====================
+    return EA_total, EI_total, Kp_total, EA_contrib, EI_contrib, Kp_contrib, active_layers
+
+# ==================== 默认层数据（添加 start_x, end_x） ====================
 def create_default_layers():
     return [
         {"layer_type": "普通材料", "r_in": 0.40, "r_out": 0.45,
-         "material": "PTFE", "E_z": 500},
+         "material": "PTFE", "E_z": 500, "start_x": 0.0, "end_x": 350.0},
         {"layer_type": "编织层", "r_in": 0.45, "r_out": 0.50,
          "d_w": 0.02, "alpha": 45.0, "PPI": 80,
-         "E_f": 200000, "E_m": 30, "E_z": None},
+         "E_f": 200000, "E_m": 30, "E_z": None,
+         "start_x": 50.0, "end_x": 300.0},
         {"layer_type": "普通材料", "r_in": 0.50, "r_out": 0.60,
-         "material": "Pebax 7233", "E_z": 50},
+         "material": "Pebax 7233", "E_z": 50, "start_x": 0.0, "end_x": 350.0},
     ]
 
 def update_braid_Ez(layer):
@@ -74,10 +79,20 @@ def update_braid_Ez(layer):
 # ==================== session_state 初始化 ====================
 if 'layers' not in st.session_state:
     st.session_state.layers = create_default_layers()
+if 'L_total' not in st.session_state:
+    st.session_state.L_total = 350.0
+if 'x_pos' not in st.session_state:
+    st.session_state.x_pos = 0.0
 
 # ==================== 侧边栏 ====================
 with st.sidebar:
     st.header("截面层结构定义")
+
+    # 导管总长度
+    L_total = st.number_input("导管总长度 (mm)", min_value=1.0,
+                              value=st.session_state.L_total, step=10.0,
+                              key="L_total_input")
+    st.session_state.L_total = L_total
 
     n_layers = st.number_input("总层数", min_value=1, max_value=10,
                                value=len(st.session_state.layers), step=1,
@@ -91,7 +106,9 @@ with st.sidebar:
                     "r_in": last_layer['r_out'],
                     "r_out": last_layer['r_out'] + 0.05,
                     "material": "自定义",
-                    "E_z": 0.0
+                    "E_z": 0.0,
+                    "start_x": 0.0,
+                    "end_x": L_total
                 })
         else:
             st.session_state.layers = st.session_state.layers[:n_layers]
@@ -118,6 +135,20 @@ with st.sidebar:
                 st.error("外半径必须大于内半径")
                 valid = False
             layer['r_in'], layer['r_out'] = r_in, r_out
+
+            # 新增：轴向起止坐标
+            col3, col4 = st.columns(2)
+            with col3:
+                start_x = st.number_input("开始坐标 (mm)", value=float(layer.get('start_x', 0.0)),
+                                          step=1.0, key=f"layer_{i}_start_x")
+            with col4:
+                end_x = st.number_input("结束坐标 (mm)", value=float(layer.get('end_x', L_total)),
+                                        step=1.0, key=f"layer_{i}_end_x")
+            if end_x <= start_x:
+                st.error("结束坐标必须大于开始坐标")
+                valid = False
+            layer['start_x'] = start_x
+            layer['end_x'] = end_x
 
             if layer_type == "普通材料":
                 material = st.selectbox("材料", list(material_library.keys()),
@@ -162,10 +193,11 @@ with st.sidebar:
 
             layers_to_save.append(layer)
 
-    # 检查层间连续性
+    # 检查层间连续性（径向，仅在同一轴向范围内检查）
+    # 由于轴向范围可能不同，此处只做简单提醒，不强制
     for i in range(1, len(layers_to_save)):
         if abs(layers_to_save[i]['r_in'] - layers_to_save[i-1]['r_out']) > 1e-6:
-            st.warning(f"第 {i+1} 层内半径与上一层外半径不一致")
+            st.warning(f"第 {i+1} 层内半径与上一层外半径不一致（可能在轴向上不同段可忽略）")
 
     if st.button("保存修改", type="primary"):
         if valid:
@@ -177,6 +209,8 @@ with st.sidebar:
 
     if st.button("恢复示例数据"):
         st.session_state.layers = create_default_layers()
+        st.session_state.L_total = 350.0
+        st.session_state.x_pos = 0.0
         st.rerun()
 
 # ==================== 主区域 ====================
@@ -186,10 +220,23 @@ if not st.session_state.layers:
     st.info("请在左侧定义至少一层")
 else:
     layers = st.session_state.layers
+    L_total = st.session_state.L_total
+
+    # 轴向位置选择器
+    st.subheader("Select Axial Position")
+    x_pos = st.slider("Axial position x (mm)", min_value=0.0,
+                      max_value=L_total, value=st.session_state.x_pos,
+                      step=0.5, key="x_pos_slider")
+    st.session_state.x_pos = x_pos
+
     try:
-        EA_total, EI_total, Kp_total, EA_contrib, EI_contrib, Kp_contrib = compute_layer_contributions(layers)
+        EA_total, EI_total, Kp_total, EA_contrib, EI_contrib, Kp_contrib, active_layers = compute_layer_contributions(layers, x_pos)
     except Exception as e:
         st.error(f"计算错误: {e}")
+        st.stop()
+
+    if not active_layers:
+        st.warning(f"在 x = {x_pos:.1f} mm 处没有层存在。")
         st.stop()
 
     # 指标
@@ -201,11 +248,11 @@ else:
     # 截面图
     st.subheader("Cross-section View")
     fig, ax = plt.subplots(figsize=(5, 5))
-    colors = plt.cm.tab10(np.linspace(0, 1, len(layers)))
+    colors = plt.cm.tab10(np.linspace(0, 1, len(active_layers)))
 
     # 从外向内绘制
-    for idx in reversed(range(len(layers))):
-        layer = layers[idx]
+    for idx in reversed(range(len(active_layers))):
+        layer = active_layers[idx]
         r_in, r_out = layer['r_in'], layer['r_out']
         ax.add_patch(plt.Circle((0, 0), r_out, color=colors[idx], alpha=0.6))
         ax.add_patch(plt.Circle((0, 0), r_in, color='white', fill=True))
@@ -214,17 +261,17 @@ else:
                                         width=r_out - r_in,
                                         fill=False, hatch='///', edgecolor='none'))
 
-    if layers[0]['r_in'] > 0:
-        ax.add_patch(plt.Circle((0, 0), layers[0]['r_in'], color='white', fill=True))
+    if active_layers[0]['r_in'] > 0:
+        ax.add_patch(plt.Circle((0, 0), active_layers[0]['r_in'], color='white', fill=True))
 
     # 标注层号
-    for i, layer in enumerate(layers):
+    for i, layer in enumerate(active_layers):
         r_mid = (layer['r_in'] + layer['r_out']) / 2
         ax.text(0, r_mid, f"L{i+1}", ha='center', va='center', fontsize=9,
                 bbox=dict(facecolor='white', alpha=0.5, edgecolor='none'))
 
-    ax.set_xlim(-layers[-1]['r_out']*1.2, layers[-1]['r_out']*1.2)
-    ax.set_ylim(-layers[-1]['r_out']*1.2, layers[-1]['r_out']*1.2)
+    ax.set_xlim(-active_layers[-1]['r_out']*1.2, active_layers[-1]['r_out']*1.2)
+    ax.set_ylim(-active_layers[-1]['r_out']*1.2, active_layers[-1]['r_out']*1.2)
     ax.set_aspect('equal')
     ax.axis('off')
     st.pyplot(fig)
@@ -236,7 +283,7 @@ else:
 
     # 条形图
     st.subheader("Layer Contributions (%) - Bar Chart")
-    labels = [f"L{i+1}" for i in range(len(layers))]
+    labels = [f"L{i+1}" for i in range(len(active_layers))]
     fig_bar, axes = plt.subplots(1, 3, figsize=(15, 5))
     fig_bar.suptitle("Layer Contributions to Stiffness (%)", y=1.02, fontsize=14)
 
@@ -268,12 +315,12 @@ else:
     })
     st.dataframe(contrib_df, use_container_width=True)
 
-    # 层参数表（补齐所有键，普通层编织参数显示为 —）
+    # 层参数表（显示所有层，包括轴向范围）
     st.subheader("Layer Parameters")
     all_keys = ['layer_type', 'r_in', 'r_out', 'material', 'E_z',
-                'd_w', 'alpha', 'PPI', 'E_f', 'E_m']
+                'd_w', 'alpha', 'PPI', 'E_f', 'E_m', 'start_x', 'end_x']
     df_rows = []
-    for layer in layers:
+    for layer in layers:  # 注意：这里显示全部层，而不仅仅是 active_layers
         row = {}
         for k in all_keys:
             row[k] = layer.get(k, None)
