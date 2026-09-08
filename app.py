@@ -23,8 +23,13 @@ material_library = {
     "钴铬合金": 220000,
 }
 
-# ==================== 计算函数（单点） ====================
+# ==================== 计算函数 ====================
 def compute_layer_contributions(layers, x_pos):
+    """
+    根据轴向位置 x_pos 筛选出有效的层，并计算各层贡献及总刚度。
+    返回：EA_total, EI_total, Kp_total, EA_contrib, EI_contrib, Kp_contrib,
+          active_layers, active_indices
+    """
     active_layers = []
     active_indices = []
     for idx, layer in enumerate(layers):
@@ -55,10 +60,12 @@ def compute_layer_contributions(layers, x_pos):
     else:
         Kp_total = 0.0
 
-    return EA_total, EI_total, Kp_total, EA_contrib, EI_contrib, Kp_contrib, active_layers, active_indices
+    return (EA_total, EI_total, Kp_total,
+            EA_contrib, EI_contrib, Kp_contrib,
+            active_layers, active_indices)
 
-# ==================== 新增：沿长度计算刚度曲线 ====================
 def compute_stiffness_along_length(layers, L_total, n_points=500):
+    """沿长度计算各点的 EA, EI, Kp"""
     x_vals = np.linspace(0, L_total, n_points)
     EA_arr = np.zeros(n_points)
     EI_arr = np.zeros(n_points)
@@ -84,6 +91,7 @@ def create_default_layers():
     ]
 
 def update_braid_Ez(layer):
+    """根据编织参数计算等效轴向模量（简化混合律）"""
     d_w, alpha, PPI = layer['d_w'], layer['alpha'], layer['PPI']
     E_f, E_m = layer['E_f'], layer['E_m']
     r_in, r_out = layer['r_in'], layer['r_out']
@@ -92,6 +100,28 @@ def update_braid_Ez(layer):
     V_f = min(1.0, (np.pi * d_w**2 * PPI) / denom) if denom > 0 else 0.0
     Ez = E_f * V_f * (np.cos(alpha_rad)**4) + E_m * (1 - V_f)
     return Ez
+
+def update_coil_Ez(layer):
+    """根据螺旋弹簧模型计算等效轴向模量"""
+    d = layer['d_w']          # 丝径 (mm)
+    pitch = layer['pitch']    # 螺距 (mm)
+    E_f = layer['E_f']        # 丝材弹性模量 (MPa)
+    r_in, r_out = layer['r_in'], layer['r_out']
+
+    # 剪切模量（泊松比默认0.3）
+    nu = 0.3
+    G = E_f / (2 * (1 + nu))
+
+    # 弹簧中径：取层的内外半径之和（假设丝中心位于层中间）
+    D = r_in + r_out
+    # 层截面积
+    A = np.pi * (r_out**2 - r_in**2)
+
+    if D > 0 and A > 0 and pitch > 0:
+        E_eq = (G * d**4 * pitch) / (8 * D**3 * A)
+    else:
+        E_eq = 0.0
+    return E_eq
 
 # ==================== session_state 初始化 ====================
 if 'layers' not in st.session_state:
@@ -105,6 +135,7 @@ if 'x_pos' not in st.session_state:
 with st.sidebar:
     st.header("截面层结构定义")
 
+    # 导管总长度
     L_total = st.number_input("导管总长度 (mm)", min_value=1.0,
                               value=st.session_state.L_total, step=10.0,
                               key="L_total_input")
@@ -134,12 +165,18 @@ with st.sidebar:
     valid = True
     for i, layer in enumerate(st.session_state.layers):
         with st.expander(f"第 {i+1} 层", expanded=(i == 0)):
-            layer_type = st.radio("层类型", ["普通材料", "编织层"],
-                                  horizontal=True,
-                                  key=f"layer_{i}_type",
-                                  index=0 if layer.get('layer_type') == '普通材料' else 1)
+            # 层类型选择
+            layer_type = st.radio(
+                "层类型",
+                ["普通材料", "编织层", "弹簧圈"],
+                horizontal=True,
+                key=f"layer_{i}_type",
+                index=0 if layer.get('layer_type') == '普通材料'
+                      else (1 if layer.get('layer_type') == '编织层' else 2)
+            )
             layer['layer_type'] = layer_type
 
+            # 径向尺寸
             col1, col2 = st.columns(2)
             with col1:
                 r_in = st.number_input("内半径 (mm)", value=float(layer['r_in']),
@@ -152,6 +189,7 @@ with st.sidebar:
                 valid = False
             layer['r_in'], layer['r_out'] = r_in, r_out
 
+            # 轴向起止坐标
             col3, col4 = st.columns(2)
             with col3:
                 start_x = st.number_input("开始坐标 (mm)", value=float(layer.get('start_x', 0.0)),
@@ -165,6 +203,7 @@ with st.sidebar:
             layer['start_x'] = start_x
             layer['end_x'] = end_x
 
+            # 根据层类型显示不同输入
             if layer_type == "普通材料":
                 material = st.selectbox("材料", list(material_library.keys()),
                                         key=f"layer_{i}_material",
@@ -185,7 +224,7 @@ with st.sidebar:
                                       step=100.0, format="%.1f")
                 layer['E_z'] = E_z
 
-            else:  # 编织层
+            elif layer_type == "编织层":
                 col1, col2 = st.columns(2)
                 with col1:
                     d_w = st.number_input("编织丝直径 (mm)", value=float(layer.get('d_w', 0.02)),
@@ -206,8 +245,25 @@ with st.sidebar:
                 layer['E_z'] = Ez_calc
                 st.success(f"编织层等效轴向模量 E_z = {Ez_calc:.1f} MPa")
 
+            else:  # 弹簧圈
+                col1, col2 = st.columns(2)
+                with col1:
+                    d_w = st.number_input("丝径 (mm)", value=float(layer.get('d_w', 0.02)),
+                                          step=0.005, format="%.3f", key=f"coil_{i}_dw")
+                    pitch = st.number_input("螺距 (mm)", value=float(layer.get('pitch', 0.1)),
+                                            step=0.01, format="%.3f", key=f"coil_{i}_pitch")
+                with col2:
+                    E_f = st.number_input("丝材模量 (MPa)", value=float(layer.get('E_f', 200000)),
+                                          step=1000.0, key=f"coil_{i}_Ef")
+
+                layer.update({'d_w': d_w, 'pitch': pitch, 'E_f': E_f})
+                Ez_calc = update_coil_Ez(layer)
+                layer['E_z'] = Ez_calc
+                st.success(f"弹簧圈等效轴向模量 E_z = {Ez_calc:.1f} MPa")
+
             layers_to_save.append(layer)
 
+    # 检查径向连续性（简单提醒）
     for i in range(1, len(layers_to_save)):
         if abs(layers_to_save[i]['r_in'] - layers_to_save[i-1]['r_out']) > 1e-6:
             st.warning(f"第 {i+1} 层内半径与上一层外半径不一致（可能在轴向上不同段可忽略）")
@@ -235,10 +291,17 @@ else:
     layers = st.session_state.layers
     L_total = st.session_state.L_total
 
+    # 轴向位置选择器
+    st.subheader("Select Axial Position")
+    x_pos = st.slider("Axial position x (mm)", min_value=0.0,
+                      max_value=L_total, value=st.session_state.x_pos,
+                      step=0.5, key="x_pos_slider")
+    st.session_state.x_pos = x_pos
+
     # 计算沿长度刚度曲线
     x_vals, EA_curve, EI_curve, Kp_curve = compute_stiffness_along_length(layers, L_total)
 
-    # 绘制沿轴向的三个刚度曲线图
+    # 绘制沿轴向刚度曲线
     st.subheader("Stiffness along Catheter Length")
     fig_curve, axes_curve = plt.subplots(3, 1, figsize=(10, 12))
     fig_curve.suptitle("Stiffness Distribution along Length", y=0.98, fontsize=14)
@@ -261,20 +324,16 @@ else:
 
     # 标记当前滑块位置
     for ax in axes_curve:
-        ax.axvline(x=st.session_state.x_pos, color='gray', linestyle='--', alpha=0.5)
+        ax.axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
 
     fig_curve.tight_layout(rect=[0, 0, 1, 0.95])
     st.pyplot(fig_curve)
 
-    # 轴向位置选择器
-    st.subheader("Select Axial Position")
-    x_pos = st.slider("Axial position x (mm)", min_value=0.0,
-                      max_value=L_total, value=st.session_state.x_pos,
-                      step=0.5, key="x_pos_slider")
-    st.session_state.x_pos = x_pos
-
+    # 计算当前位置的截面数据
     try:
-        EA_total, EI_total, Kp_total, EA_contrib, EI_contrib, Kp_contrib, active_layers, active_indices = compute_layer_contributions(layers, x_pos)
+        (EA_total, EI_total, Kp_total,
+         EA_contrib, EI_contrib, Kp_contrib,
+         active_layers, active_indices) = compute_layer_contributions(layers, x_pos)
     except Exception as e:
         st.error(f"计算错误: {e}")
         st.stop()
@@ -283,7 +342,7 @@ else:
         st.warning(f"在 x = {x_pos:.1f} mm 处没有层存在。")
         st.stop()
 
-    # 指标
+    # 总刚度指标
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Axial Stiffness EA", f"{EA_total:.2f} N")
     c2.metric("Total Bending Stiffness EI", f"{EI_total:.2f} N·mm²")
@@ -294,19 +353,28 @@ else:
     fig, ax = plt.subplots(figsize=(5, 5))
     colors = plt.cm.tab10(np.linspace(0, 1, len(active_layers)))
 
+    # 从外向内绘制
     for i in reversed(range(len(active_layers))):
         layer = active_layers[i]
         r_in, r_out = layer['r_in'], layer['r_out']
         ax.add_patch(plt.Circle((0, 0), r_out, color=colors[i], alpha=0.6))
         ax.add_patch(plt.Circle((0, 0), r_in, color='white', fill=True))
+
+        # 根据层类型添加填充样式
         if layer.get('layer_type') == '编织层':
             ax.add_patch(mpatches.Wedge((0, 0), r_out, 0, 360,
                                         width=r_out - r_in,
                                         fill=False, hatch='///', edgecolor='none'))
+        elif layer.get('layer_type') == '弹簧圈':
+            ax.add_patch(mpatches.Wedge((0, 0), r_out, 0, 360,
+                                        width=r_out - r_in,
+                                        fill=False, hatch='xxx', edgecolor='none'))
 
+    # 最内腔
     if active_layers[0]['r_in'] > 0:
         ax.add_patch(plt.Circle((0, 0), active_layers[0]['r_in'], color='white', fill=True))
 
+    # 标注层号（使用全局层号）
     for i, layer in enumerate(active_layers):
         r_mid = (layer['r_in'] + layer['r_out']) / 2
         global_idx = active_indices[i]
@@ -358,10 +426,10 @@ else:
     })
     st.dataframe(contrib_df, use_container_width=True)
 
-    # 层参数表（显示所有层，包括轴向范围）
+    # 层参数表
     st.subheader("Layer Parameters")
     all_keys = ['layer_type', 'r_in', 'r_out', 'material', 'E_z',
-                'd_w', 'alpha', 'PPI', 'E_f', 'E_m', 'start_x', 'end_x']
+                'd_w', 'alpha', 'PPI', 'E_f', 'E_m', 'pitch', 'start_x', 'end_x']
     df_rows = []
     for idx, layer in enumerate(layers):
         row = {"Layer": f"L{idx+1}"}
