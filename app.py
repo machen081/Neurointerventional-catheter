@@ -287,11 +287,32 @@ def compute_at_x(structure, x):
     layers.sort(key=lambda l: -l['r_out'])
     return layers
 
-# ==================== 刚度计算（已修正抗压扁模型） ====================
+# ==================== 单层抗压扁刚度（含曲梁修正） ====================
+def compute_wall_bending_stiffness(E_theta, r_in, r_out):
+    """
+    计算单层管壁对径压缩的弯曲刚度（单位轴向深度）。
+    使用曲梁理论，考虑中性轴偏移。
+    当 t/R 很小时自动退化为直梁公式 E·t³/12。
+    """
+    t = r_out - r_in
+    if t <= 0:
+        return 0.0
+    # 保护：r_in 太小或壁厚过大时，曲梁公式失效，退化为直梁
+    if r_in <= 1e-9 or r_in / r_out < 0.5:
+        return E_theta * t**3 / 12
+
+    r_n = t / np.log(r_out / r_in)   # 中性轴半径
+    R_layer = (r_out + r_in) / 2      # 层中面半径
+    e = R_layer - r_n                  # 中性轴偏移
+
+    # 曲梁弯曲刚度 EI = E · A · e · r_n，A = t（单位深度）
+    return E_theta * t * e * r_n
+
+# ==================== 刚度计算 ====================
 def compute_stiffness(layers):
     """
-    轴向刚度 EA 与弯曲刚度 EI 使用轴向模量 E_z 和全环惯性矩；
-    抗压扁刚度 Kp 使用环向模量 E_θ 和管壁横截面惯性矩 t³/12，
+    EA 与 EI 使用轴向模量 E_z 和全环惯性矩；
+    Kp 使用环向模量 E_θ 和曲梁修正的管壁弯曲刚度，
     采用 Timoshenko 薄壁圆环对径压缩解，常数 = π/4 - 2/π ≈ 0.1488。
     """
     EA_c, EI_c, EI_theta_c = [], [], []
@@ -299,14 +320,13 @@ def compute_stiffness(layers):
         r_in, r_out = l['r_in'], l['r_out']
         E_z = l['E_z']
         E_theta = l.get('E_theta', E_z)
-        t = r_out - r_in
 
         # 轴向刚度：全环截面积
         EA_c.append(np.pi * E_z * (r_out**2 - r_in**2))
         # 弯曲刚度：全环惯性矩（梁弯曲）
         EI_c.append((np.pi / 4) * E_z * (r_out**4 - r_in**4))
-        # 抗压扁：管壁横截面惯性矩（单位轴向长度的矩形截面）
-        EI_theta_c.append(E_theta * t**3 / 12)
+        # 抗压扁：曲梁修正的管壁弯曲刚度
+        EI_theta_c.append(compute_wall_bending_stiffness(E_theta, r_in, r_out))
 
     EA = sum(EA_c)
     EI = sum(EI_c)
@@ -316,7 +336,6 @@ def compute_stiffness(layers):
         r0 = min(l['r_in'] for l in layers)
         rn = max(l['r_out'] for l in layers)
         R = (r0 + rn) / 2
-        # Timoshenko 薄环对径压缩常数
         const = np.pi/4 - 2/np.pi   # ≈ 0.1488
         Kp = EI_theta / (R**3 * const)
         Kp_c = [ei / EI_theta * Kp for ei in EI_theta_c] if EI_theta > 0 else [0.0]*len(layers)
@@ -463,7 +482,7 @@ axes[1].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
 axes[2].plot(xs, Kp_arr, 'r-', linewidth=2)
 axes[2].set_ylabel('Crush Stiffness Kp (N/mm)')
 axes[2].set_xlabel('Axial position (mm)')
-axes[2].set_title('Crush Stiffness (uses E_theta, wall bending)')
+axes[2].set_title('Crush Stiffness (uses E_theta, curved-beam wall)')
 axes[2].grid(True)
 axes[2].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
 
@@ -482,6 +501,19 @@ else:
     c1.metric("Total Axial Stiffness EA", f"{EA:.2f} N")
     c2.metric("Total Bending Stiffness EI", f"{EI:.2f} N·mm²")
     c3.metric("Total Crush Stiffness Kp", f"{Kp:.2f} N/mm")
+
+    # 厚壁警告
+    if layers:
+        r0_w = min(l['r_in'] for l in layers)
+        rn_w = max(l['r_out'] for l in layers)
+        t_wall = rn_w - r0_w
+        R_w = (r0_w + rn_w) / 2
+        if R_w > 0 and t_wall / R_w > 0.1:
+            st.warning(
+                f"⚠️ 当前壁厚/半径比 = {t_wall/R_w:.2f} > 0.1。"
+                f"抗压扁刚度 Kp 使用曲梁修正，但在厚壁下仍可能有偏差"
+                f"（通常低估 2~4 倍）。如需精确值，建议有限元分析或实验标定。"
+            )
 
     hot_melt_E = find_hot_melt_E(structure, x_pos)
     if hot_melt_E is not None:
@@ -539,7 +571,7 @@ else:
     axes3[1].grid(axis='y', linestyle='--', alpha=0.6)
 
     axes3[2].bar(labels, kp_pct, color=colors)
-    axes3[2].set_title('Crush (Kp) - uses E_theta, wall bending')
+    axes3[2].set_title('Crush (Kp) - uses E_theta, curved beam')
     axes3[2].set_ylabel('Contribution (%)')
     axes3[2].grid(axis='y', linestyle='--', alpha=0.6)
 
