@@ -287,16 +287,26 @@ def compute_at_x(structure, x):
     layers.sort(key=lambda l: -l['r_out'])
     return layers
 
-# ==================== 刚度计算 ====================
+# ==================== 刚度计算（已修正抗压扁模型） ====================
 def compute_stiffness(layers):
+    """
+    轴向刚度 EA 与弯曲刚度 EI 使用轴向模量 E_z 和全环惯性矩；
+    抗压扁刚度 Kp 使用环向模量 E_θ 和管壁横截面惯性矩 t³/12，
+    采用 Timoshenko 薄壁圆环对径压缩解，常数 = π/4 - 2/π ≈ 0.1488。
+    """
     EA_c, EI_c, EI_theta_c = [], [], []
     for l in layers:
         r_in, r_out = l['r_in'], l['r_out']
         E_z = l['E_z']
         E_theta = l.get('E_theta', E_z)
+        t = r_out - r_in
+
+        # 轴向刚度：全环截面积
         EA_c.append(np.pi * E_z * (r_out**2 - r_in**2))
+        # 弯曲刚度：全环惯性矩（梁弯曲）
         EI_c.append((np.pi / 4) * E_z * (r_out**4 - r_in**4))
-        EI_theta_c.append((np.pi / 4) * E_theta * (r_out**4 - r_in**4))
+        # 抗压扁：管壁横截面惯性矩（单位轴向长度的矩形截面）
+        EI_theta_c.append(E_theta * t**3 / 12)
 
     EA = sum(EA_c)
     EI = sum(EI_c)
@@ -306,7 +316,9 @@ def compute_stiffness(layers):
         r0 = min(l['r_in'] for l in layers)
         rn = max(l['r_out'] for l in layers)
         R = (r0 + rn) / 2
-        Kp = EI_theta / (R**3 * (np.pi/2 - 4/np.pi))
+        # Timoshenko 薄环对径压缩常数
+        const = np.pi/4 - 2/np.pi   # ≈ 0.1488
+        Kp = EI_theta / (R**3 * const)
         Kp_c = [ei / EI_theta * Kp for ei in EI_theta_c] if EI_theta > 0 else [0.0]*len(layers)
     else:
         Kp = 0.0
@@ -451,7 +463,7 @@ axes[1].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
 axes[2].plot(xs, Kp_arr, 'r-', linewidth=2)
 axes[2].set_ylabel('Crush Stiffness Kp (N/mm)')
 axes[2].set_xlabel('Axial position (mm)')
-axes[2].set_title('Crush Stiffness (uses E_theta)')
+axes[2].set_title('Crush Stiffness (uses E_theta, wall bending)')
 axes[2].grid(True)
 axes[2].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
 
@@ -527,7 +539,7 @@ else:
     axes3[1].grid(axis='y', linestyle='--', alpha=0.6)
 
     axes3[2].bar(labels, kp_pct, color=colors)
-    axes3[2].set_title('Crush (Kp) - uses E_theta')
+    axes3[2].set_title('Crush (Kp) - uses E_theta, wall bending')
     axes3[2].set_ylabel('Contribution (%)')
     axes3[2].grid(axis='y', linestyle='--', alpha=0.6)
 
