@@ -23,7 +23,7 @@ LAYER_TYPES = {
                     '扁丝宽度(mm)': 0.05, '扁丝厚度(mm)': 0.02,
                     '股数': 16, '每束根数': 1, '每英寸交叉数': 80,
                     '丝材模量(MPa)': 200000.0, '原始基体体积分数': 0.0},
-        'caption': '编织层（扁丝）：编织角自动计算；热熔渗入自动读取；E_z 用于轴向/弯曲，E_θ 用于抗压扁'
+        'caption': '编织层：编织角自动计算；E_z 用于轴向/弯曲，E_θ 用于抗压扁'
     },
     '弹簧圈': {
         'columns': ['起始位置(mm)', '结束位置(mm)', '内半径(mm)', '外半径(mm)',
@@ -32,7 +32,7 @@ LAYER_TYPES = {
                     '内半径(mm)': 0.42, '外半径(mm)': 0.45,
                     '丝径(mm)': 0.02, '螺距(mm)': 0.10,
                     '丝材模量(MPa)': 200000.0, '原始基体体积分数': 0.0},
-        'caption': '弹簧圈：热熔渗入自动读取；E_z 用弹簧模型，E_θ 用丝材体积分数'
+        'caption': '弹簧圈：E_z 用弹簧模型，E_θ 用丝材体积分数'
     },
 }
 
@@ -44,18 +44,19 @@ def make_default_layer(layer_type, L_total=350, r_in=0.4, r_out=0.45):
     return pd.DataFrame([d])
 
 def create_default_structure(L_total=350):
+    """默认层名使用英文，确保图表显示英文"""
     return [
-        {'name': '热熔层', 'type': '普通材料',
+        {'name': 'Hot Melt', 'type': '普通材料',
          'data': pd.DataFrame([{'起始位置(mm)': 0.0, '结束位置(mm)': L_total,
                                 '内半径(mm)': 0.55, '外半径(mm)': 0.60,
                                 '弹性模量(MPa)': 50.0}])},
-        {'name': '编织层', 'type': '编织层',
+        {'name': 'Braid', 'type': '编织层',
          'data': pd.DataFrame([{'起始位置(mm)': 0.0, '结束位置(mm)': L_total,
                                 '内半径(mm)': 0.45, '外半径(mm)': 0.55,
                                 '扁丝宽度(mm)': 0.05, '扁丝厚度(mm)': 0.02,
                                 '股数': 16, '每束根数': 1, '每英寸交叉数': 80,
                                 '丝材模量(MPa)': 200000.0, '原始基体体积分数': 0.0}])},
-        {'name': '弹簧圈', 'type': '弹簧圈',
+        {'name': 'Coil', 'type': '弹簧圈',
          'data': pd.DataFrame([{'起始位置(mm)': 0.0, '结束位置(mm)': L_total,
                                 '内半径(mm)': 0.42, '外半径(mm)': 0.45,
                                 '丝径(mm)': 0.02, '螺距(mm)': 0.10,
@@ -66,7 +67,6 @@ def create_default_structure(L_total=350):
                                 '弹性模量(MPa)': 500.0}])},
     ]
 
-# ==================== 数据规范化 ====================
 def normalize_structure(structure):
     for layer in structure:
         expected_cols = LAYER_TYPES[layer['type']]['columns']
@@ -82,7 +82,6 @@ def normalize_structure(structure):
             layer['data'] = new_df
     return structure
 
-# ==================== 分段查找 ====================
 def find_segment(df, x):
     if df is None or df.empty:
         return None
@@ -95,7 +94,6 @@ def find_segment(df, x):
     return None
 
 def find_hot_melt_E(structure, x):
-    """查找位置 x 处最外层的热熔层（普通材料层）弹性模量"""
     candidates = []
     for layer in structure:
         row = find_segment(layer['data'], x)
@@ -113,21 +111,14 @@ def find_hot_melt_E(structure, x):
     candidates.sort(key=lambda c: -c[0])
     return candidates[0][1]
 
-# ==================== 编织角自动计算 ====================
 def compute_braid_angle(r_in, r_out, PPI, N_strands):
-    """tan(α) = π·D_mid·PPI/(25.4·N)，D_mid = r_in + r_out"""
     D_mid = r_in + r_out
     if N_strands <= 0 or D_mid <= 0:
         return 45.0
     val = np.pi * D_mid * PPI / (25.4 * N_strands)
     return np.degrees(np.arctan(val))
 
-# ==================== 编织层各向异性模量与空隙计算 ====================
 def compute_braid_moduli(row, E_hm):
-    """
-    返回 (E_z, E_θ, V_f, V_void, alpha)
-    有效基体模量：E_m_eff = E_hm · V_void / (V_void + V_matrix)
-    """
     if E_hm is None:
         E_hm = 0.0
     w = row['扁丝宽度(mm)']; t = row['扁丝厚度(mm)']
@@ -139,33 +130,22 @@ def compute_braid_moduli(row, E_hm):
     alpha = compute_braid_angle(r_in, r_out, PPI, N)
     alpha_rad = np.radians(alpha)
 
-    # 纤维体积分数
     denom = np.pi * (r_out**2 - r_in**2) * np.cos(alpha_rad)
     if denom > 0:
         V_f = min(1.0, 2 * N * n_s * w * t / denom)
     else:
         V_f = 0.0
-
-    # 空隙体积分数
     V_void = max(0.0, 1.0 - V_f - V_matrix)
-
-    # 有效基体模量（热熔填充空隙）
     if V_void + V_matrix > 0:
         E_m_eff = E_hm * V_void / (V_void + V_matrix)
     else:
         E_m_eff = 0.0
 
-    # 轴向与环向模量
     E_z = E_f * V_f * (np.cos(alpha_rad)**4) + E_m_eff * (1 - V_f)
     E_theta = E_f * V_f * (np.sin(alpha_rad)**4) + E_m_eff * (1 - V_f)
-
     return E_z, E_theta, V_f, V_void, alpha
 
-# ==================== 弹簧圈各向异性模量与空隙计算 ====================
 def compute_coil_moduli(row, E_hm):
-    """
-    返回 (E_z, E_θ, V_spring, V_void)
-    """
     if E_hm is None:
         E_hm = 0.0
     d = row['丝径(mm)']; pitch = row['螺距(mm)']
@@ -178,34 +158,25 @@ def compute_coil_moduli(row, E_hm):
     D = r_in + r_out
     A = np.pi * (r_out**2 - r_in**2)
 
-    # 弹簧丝体积分数
     if pitch > 0 and r_out > r_in:
         V_spring = min(1.0, (np.pi * d**2 / 4) / (pitch * (r_out - r_in)))
     else:
         V_spring = 0.0
 
-    # 空隙
     V_void = max(0.0, 1.0 - V_spring - V_matrix)
-
-    # 有效基体模量
     if V_void + V_matrix > 0:
         E_m_eff = E_hm * V_void / (V_void + V_matrix)
     else:
         E_m_eff = 0.0
 
-    # 轴向：弹簧模型 + 基体并联
     if D > 0 and A > 0 and pitch > 0:
         E_spring_axial = G * d**4 * pitch / (8 * D**3 * A)
     else:
         E_spring_axial = 0.0
     E_z = E_spring_axial + E_m_eff * (1 - V_spring)
-
-    # 环向：丝材直接贡献（相当于缠绕方向的等效拉伸模量）
     E_theta = E_f * V_spring + E_m_eff * (1 - V_spring)
-
     return E_z, E_theta, V_spring, V_void
 
-# ==================== 截面生成 ====================
 def compute_at_x(structure, x):
     hot_melt_E = find_hot_melt_E(structure, x)
     layers = []
@@ -244,12 +215,7 @@ def compute_at_x(structure, x):
     layers.sort(key=lambda l: -l['r_out'])
     return layers
 
-# ==================== 刚度计算 ====================
 def compute_stiffness(layers):
-    """
-    EA 与 EI 使用轴向模量 E_z；
-    Kp 使用环向模量 E_θ（体现不同方向的不同刚度贡献）。
-    """
     EA_c, EI_c, EI_theta_c = [], [], []
     for l in layers:
         r_in, r_out = l['r_in'], l['r_out']
@@ -267,7 +233,6 @@ def compute_stiffness(layers):
         r0 = min(l['r_in'] for l in layers)
         rn = max(l['r_out'] for l in layers)
         R = (r0 + rn) / 2
-        # 抗压扁使用环向弯曲刚度
         Kp = EI_theta / (R**3 * (np.pi/2 - 4/np.pi))
         Kp_c = [ei / EI_theta * Kp for ei in EI_theta_c] if EI_theta > 0 else [0.0]*len(layers)
     else:
@@ -302,7 +267,7 @@ with st.sidebar:
     st.session_state.L_total = L_total
 
     st.markdown("**层顺序：列表第一个为最外层**")
-    st.info("热熔模量自动读取；编织角自动计算；E_z 用于轴向/弯曲，E_θ 用于抗压扁。")
+    st.info("热熔模量自动读取；编织角自动计算。图表中显示的层名请使用英文。")
 
     with st.expander("➕ 添加新层"):
         new_type = st.selectbox("层类型", list(LAYER_TYPES.keys()), key="new_type")
@@ -318,7 +283,7 @@ with st.sidebar:
             else:
                 r_out_ref, r_in_ref = 0.6, 0.4
             new_layer = {
-                'name': f'第{len(st.session_state.structure)+1}层',
+                'name': f'Layer {len(st.session_state.structure)+1}',
                 'type': new_type,
                 'data': make_default_layer(new_type, L_total, r_in_ref, r_out_ref)
             }
@@ -332,7 +297,7 @@ with st.sidebar:
         with st.expander(f"第{i+1}层：{layer['name']}（{layer['type']}）", expanded=False):
             col1, col2, col3 = st.columns([2, 2, 1])
             with col1:
-                layer['name'] = st.text_input("名称", value=layer['name'],
+                layer['name'] = st.text_input("名称（图表中显示）", value=layer['name'],
                                               key=f"name_{i}")
             with col2:
                 new_type = st.selectbox(
@@ -370,12 +335,12 @@ with st.sidebar:
         st.rerun()
 
 # ==================== 主区域 ====================
-st.header("微导管多层结构刚度分析")
+st.header("Catheter Multi-layer Stiffness Analysis")
 
 structure = st.session_state.structure
 L_total = st.session_state.L_total
 
-x_pos = st.slider("轴向位置 x (mm)", min_value=0.0, max_value=L_total,
+x_pos = st.slider("Axial position x (mm)", min_value=0.0, max_value=L_total,
                   value=st.session_state.x_pos, step=0.5)
 st.session_state.x_pos = x_pos
 
@@ -426,7 +391,7 @@ else:
     else:
         st.warning("未找到热熔层，渗入基体模量按 0 计算。")
 
-    # 截面图
+    # 截面图（层名来自用户输入，默认为英文）
     st.subheader("Cross-section View")
     fig2, ax2 = plt.subplots(figsize=(5, 5))
     colors = plt.cm.tab10(np.linspace(0, 1, max(len(layers), 1)))
@@ -460,7 +425,7 @@ else:
     ax2.axis('off')
     st.pyplot(fig2)
 
-    # 百分比条形图
+    # 百分比条形图（层名来自用户输入，默认为英文）
     st.subheader("Layer Contributions (%)")
     labels = [l['name'] for l in layers]
     ea_pct = [v/EA*100 if EA > 0 else 0 for v in EA_c]
@@ -497,21 +462,20 @@ else:
     })
     st.dataframe(contrib_df, use_container_width=True)
 
-    # 层参数表
     st.subheader("Layer Parameters at This Position")
     param_rows = []
     for l in layers:
         row = {
-            "层名称": l['name'],
-            "类型": l['type'],
-            "内半径 (mm)": l['r_in'],
-            "外半径 (mm)": l['r_out'],
+            "Layer": l['name'],
+            "Type": l['type'],
+            "r_in (mm)": l['r_in'],
+            "r_out (mm)": l['r_out'],
             "E_z (MPa)": f"{l['E_z']:.2f}",
-            "E_θ (MPa)": f"{l['E_theta']:.2f}",
+            "E_theta (MPa)": f"{l['E_theta']:.2f}",
         }
         row["V_f (%)"] = f"{l['V_f']*100:.2f}%" if l['V_f'] is not None else "—"
         row["V_void (%)"] = f"{l['V_void']*100:.2f}%" if l['V_void'] is not None else "—"
-        row["编织角 (°)"] = f"{l['alpha']:.2f}" if l['alpha'] is not None else "—"
+        row["Braid Angle (°)"] = f"{l['alpha']:.2f}" if l['alpha'] is not None else "—"
         param_rows.append(row)
     param_df = pd.DataFrame(param_rows)
     st.dataframe(param_df, use_container_width=True)
