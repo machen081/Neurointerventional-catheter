@@ -289,7 +289,6 @@ def compute_at_x(structure, x):
 
 # ==================== 单层管壁刚度（曲梁修正） ====================
 def compute_wall_bending_stiffness(E_theta, r_in, r_out):
-    """管壁弯曲刚度，曲梁修正；薄壁时退化为 E·t³/12"""
     t = r_out - r_in
     if t <= 0:
         return 0.0
@@ -301,19 +300,13 @@ def compute_wall_bending_stiffness(E_theta, r_in, r_out):
     return E_theta * t * e * r_n
 
 def compute_wall_axial_stiffness(E_theta, r_in, r_out):
-    """管壁环向拉伸刚度"""
     t = r_out - r_in
     if t <= 0:
         return 0.0
     return E_theta * t
 
 # ==================== 刚度计算（自适应模型） ====================
-def compute_stiffness(layers):
-    """
-    根据整体壁厚比 t/R 自动选择抗压扁模型：
-      t/R < 0.1：薄壁，纯弯曲模型
-      t/R >= 0.1：厚壁，弯曲 + 环向拉伸模型
-    """
+def compute_stiffness(layers, correction_factor=1.0):
     EA_c, EI_c = [], []
     EI_theta_bend_c, EA_theta_c = [], []
 
@@ -341,18 +334,21 @@ def compute_stiffness(layers):
         const = np.pi/4 - 2/np.pi
 
         if thick_ratio < 0.1:
-            # 薄壁：纯弯曲
-            Kp = const * 0 + (EI_theta_bend / (R**3 * const)) if EI_theta_bend > 0 else 0.0
+            Kp_raw = EI_theta_bend / (R**3 * const) if EI_theta_bend > 0 else 0.0
             model_used = "thin-wall (bending only)"
         else:
-            # 厚壁：弯曲 + 环向拉伸柔度相加
             compliance = 0.0
             if EI_theta_bend > 0:
                 compliance += const * R**3 / EI_theta_bend
             if EA_theta > 0:
                 compliance += const * R / EA_theta
-            Kp = 1.0 / compliance if compliance > 0 else 0.0
-            model_used = "thick-wall (bending + hoop tension)"
+            Kp_raw = 1.0 / compliance if compliance > 0 else 0.0
+            if thick_ratio < 0.5:
+                model_used = "thick-wall (bending + hoop tension)"
+            else:
+                model_used = "very thick wall (approximate)"
+
+        Kp = Kp_raw * correction_factor
 
         if EI_theta_bend > 0:
             Kp_c = [ei / EI_theta_bend * Kp for ei in EI_theta_bend_c]
@@ -366,12 +362,12 @@ def compute_stiffness(layers):
 
     return EA, EI, Kp, EA_c, EI_c, Kp_c, model_used, thick_ratio
 
-def compute_along_length(structure, L_total, n=300):
+def compute_along_length(structure, L_total, correction_factor=1.0, n=300):
     xs = np.linspace(0, L_total, n)
     EA_arr = np.zeros(n); EI_arr = np.zeros(n); Kp_arr = np.zeros(n)
     for i, x in enumerate(xs):
         layers = compute_at_x(structure, x)
-        EA, EI, Kp, _, _, _, _, _ = compute_stiffness(layers)
+        EA, EI, Kp, _, _, _, _, _ = compute_stiffness(layers, correction_factor)
         EA_arr[i] = EA; EI_arr[i] = EI; Kp_arr[i] = Kp
     return xs, EA_arr, EI_arr, Kp_arr
 
@@ -384,6 +380,8 @@ if 'L_total' not in st.session_state:
     st.session_state.L_total = 350.0
 if 'x_pos' not in st.session_state:
     st.session_state.x_pos = 0.0
+if 'kp_correction' not in st.session_state:
+    st.session_state.kp_correction = 1.0
 
 # ==================== 侧边栏 ====================
 with st.sidebar:
@@ -454,16 +452,95 @@ with st.sidebar:
             )
 
     st.markdown("---")
+    st.markdown("**抗压扁刚度修正**")
+    kp_correction = st.number_input(
+        "Kp 修正系数（理论值 × 系数 = 报告值）",
+        min_value=0.01, max_value=10.0,
+        value=float(st.session_state.kp_correction),
+        step=0.01, format="%.3f",
+        key="kp_correction_input"
+    )
+    st.session_state.kp_correction = kp_correction
+    st.caption("默认 1.000（不修正）。若做过实验或有限元标定，填入实测值/理论值。")
+
+    st.markdown("---")
     if st.button("恢复示例数据"):
         st.session_state.structure = create_default_structure(L_total)
         st.session_state.x_pos = 0.0
+        st.session_state.kp_correction = 1.0
         st.rerun()
 
 # ==================== 半径校验结果 ====================
 st.header("Catheter Multi-layer Stiffness Analysis")
 
+# 使用流程说明（可折叠）
+with st.expander("📖 使用流程说明（点击展开）", expanded=False):
+    st.markdown("""
+### 一、定义导管结构
+
+1. 在左侧设置导管总长度。
+2. 点击「➕ 添加新层」添加层，或直接编辑现有层。
+3. **层顺序**：列表中第一个为最外层，最后一个为最内层。默认顺序为 Hot Melt → Braid → Coil → PTFE。
+4. 每层可选择三种类型之一：
+   - **普通材料**：填写内半径、外半径、弹性模量。
+   - **编织层**：填写内外半径、扁丝宽度/厚度、股数、每束根数、PPI、丝材模量、原始基体体积分数。编织角自动计算。
+   - **弹簧圈**：填写内外半径、丝径、螺距、丝材模量、原始基体体积分数。
+5. 每层的表格可添加多行，实现**沿轴向分段**。每行代表一段，指定起始位置、结束位置及该段参数。
+
+### 二、热熔渗入（防呆设计）
+
+- 编织层和弹簧圈的**渗入热熔模量**自动取自当前位置最外层普通材料层（通常是 Hot Melt）。
+- 无需手动输入，界面会显示当前位置读取到的热熔模量。
+- 若未找到热熔层，渗入基体模量按 0 计算，并给出警告。
+
+### 三、检查校验结果
+
+- **错误（红色）**：阻止计算，必须修正。包括起始位置为负、内外半径倒置、外半径不大于内半径等。
+- **警告（黄色）**：不阻止计算，但需留意。包括分段超出总长、相邻层间隙或重叠超过 5 µm 等。
+
+### 四、查看沿长度刚度分布
+
+- 主区域上方显示三条曲线：轴向刚度 EA、弯曲刚度 EI、抗压扁刚度 Kp。
+- 滑动滑块选择轴向位置 x，曲线上的灰色虚线会同步标记该位置。
+- 当前位置的所有结果（指标、截面图、贡献百分比）都基于该位置存在的层计算。
+
+### 五、查看当前截面分析
+
+- **三个指标**：当前位置的 EA、EI、Kp 数值。
+- **壁厚比提示**：根据壁厚/半径比自动分档，并说明使用的模型和精度。
+  - 薄壁（< 0.1）：Timoshenko 薄环理论，偏差 < 5%。
+  - 厚壁（0.1 ~ 0.5）：曲梁修正 + 环向拉伸，预计偏差 10~40%。
+  - 极厚壁（≥ 0.5）：近似估计，偏差 40~60%，建议有限元或实验标定。
+- **截面图**：编织层用斜线填充，弹簧圈用叉线填充，普通材料纯色。
+- **贡献百分比条形图**：各层对 EA、EI、Kp 的相对贡献。
+- **层参数表**：包含 E_z、E_θ、V_f、V_void、编织角等。
+
+### 六、Kp 修正系数（关键）
+
+**目的**：将解析模型的理论值校准到实际值。
+
+**使用流程**：
+
+1. **薄壁导管（λ < 0.1）**：修正系数保持 1.000，直接使用理论值（精度高）。
+2. **厚壁或极厚壁导管（λ ≥ 0.1）**：
+   - 第一步：先用理论值（修正系数 = 1.000）估算。
+   - 第二步：做一次实验（平板压缩测 F-ΔD）或有限元仿真，得到实测 Kp。
+   - 第三步：计算修正系数 = 实测 Kp / 理论 Kp。
+   - 第四步：将修正系数填入左侧输入框（例如 1.35 或 0.75）。
+   - 第五步：后续同类导管可直接沿用该系数，无需重复标定。
+
+**注意**：修正系数是经验值，只适用于与标定工况相近的导管。若结构、材料、壁厚比变化较大，建议重新标定。
+
+### 七、保存与导出
+
+- 当前配置存在浏览器会话中，刷新页面会保留。
+- 若需持久化，可截图或手动记录参数。
+- 若需对比多个版本，可分别保存截图，或自行导出 CSV。
+    """)
+
 structure = st.session_state.structure
 L_total = st.session_state.L_total
+kp_correction = st.session_state.kp_correction
 
 errors, warnings = validate_structure(structure, L_total)
 if errors:
@@ -483,7 +560,7 @@ x_pos = st.slider("Axial position x (mm)", min_value=0.0, max_value=L_total,
                   value=st.session_state.x_pos, step=0.5)
 st.session_state.x_pos = x_pos
 
-xs, EA_arr, EI_arr, Kp_arr = compute_along_length(structure, L_total)
+xs, EA_arr, EI_arr, Kp_arr = compute_along_length(structure, L_total, kp_correction)
 
 st.subheader("Stiffness along Length")
 fig, axes = plt.subplots(3, 1, figsize=(10, 12))
@@ -504,7 +581,7 @@ axes[1].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
 axes[2].plot(xs, Kp_arr, 'r-', linewidth=2)
 axes[2].set_ylabel('Crush Stiffness Kp (N/mm)')
 axes[2].set_xlabel('Axial position (mm)')
-axes[2].set_title('Crush Stiffness (auto-selected model)')
+axes[2].set_title(f'Crush Stiffness (correction × {kp_correction:.3f})')
 axes[2].grid(True)
 axes[2].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
 
@@ -517,25 +594,35 @@ layers = compute_at_x(structure, x_pos)
 if not layers:
     st.warning("该位置没有层存在。")
 else:
-    EA, EI, Kp, EA_c, EI_c, Kp_c, model_used, thick_ratio = compute_stiffness(layers)
+    EA, EI, Kp, EA_c, EI_c, Kp_c, model_used, thick_ratio = compute_stiffness(layers, kp_correction)
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Axial Stiffness EA", f"{EA:.2f} N")
     c2.metric("Total Bending Stiffness EI", f"{EI:.2f} N·mm²")
     c3.metric("Total Crush Stiffness Kp", f"{Kp:.2f} N/mm")
 
-    # 显示模型分类（用信息框）
+    # 三档壁厚提示
     if thick_ratio < 0.1:
         st.info(
             f"壁厚/半径比 = **{thick_ratio:.3f}** < 0.1（薄壁）。"
-            f"抗压扁模型：**{model_used}**。Timoshenko 薄环理论，精度高。"
+            f"抗压扁模型：**{model_used}**。Timoshenko 薄环理论，精度高（偏差 < 5%）。"
+            f"当前修正系数：**{kp_correction:.3f}**。"
+        )
+    elif thick_ratio < 0.5:
+        st.warning(
+            f"壁厚/半径比 = **{thick_ratio:.3f}** ∈ [0.1, 0.5)（厚壁）。"
+            f"抗压扁模型：**{model_used}**。"
+            f"已包含曲梁弯曲修正和环向拉伸，未包含剪切。"
+            f"预计偏差 10~40%，建议实验或有限元标定修正系数。"
+            f"当前修正系数：**{kp_correction:.3f}**。"
         )
     else:
-        st.warning(
-            f"壁厚/半径比 = **{thick_ratio:.3f}** ≥ 0.1（厚壁）。"
+        st.error(
+            f"壁厚/半径比 = **{thick_ratio:.3f}** ≥ 0.5（极厚壁）。"
             f"抗压扁模型：**{model_used}**。"
-            f"已包含曲梁弯曲修正和环向拉伸，未包含剪切变形。"
-            f"在极厚壁下可能仍有 20~50% 偏差，建议有限元或实验标定。"
+            f"当前解析模型为近似估计，预计偏差 40~60%。"
+            f"强烈建议有限元或实验标定后填入修正系数。"
+            f"当前修正系数：**{kp_correction:.3f}**。"
         )
 
     hot_melt_E = find_hot_melt_E(structure, x_pos)
