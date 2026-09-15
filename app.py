@@ -44,7 +44,6 @@ def make_default_layer(layer_type, L_total=350, r_in=0.4, r_out=0.45):
     return pd.DataFrame([d])
 
 def create_default_structure(L_total=350):
-    """默认层名使用英文，确保图表显示英文"""
     return [
         {'name': 'Hot Melt', 'type': '普通材料',
          'data': pd.DataFrame([{'起始位置(mm)': 0.0, '结束位置(mm)': L_total,
@@ -82,6 +81,83 @@ def normalize_structure(structure):
             layer['data'] = new_df
     return structure
 
+# ==================== 半径校验 ====================
+def validate_structure(structure, L_total):
+    """校验各层半径与轴向覆盖是否合理，返回 (errors, warnings)"""
+    errors = []
+    warnings = []
+
+    for i, layer in enumerate(structure):
+        df = layer['data']
+        name = layer['name']
+        if df is None or df.empty:
+            errors.append(f"第 {i+1} 层（{name}）没有任何分段数据")
+            continue
+
+        for j, row in df.iterrows():
+            try:
+                start = row['起始位置(mm)']
+                end = row['结束位置(mm)']
+                r_in = row['内半径(mm)']
+                r_out = row['外半径(mm)']
+            except KeyError:
+                errors.append(f"第 {i+1} 层（{name}）分段 {j+1} 缺少必要列")
+                continue
+
+            # 轴向范围校验
+            if start < 0:
+                errors.append(f"第 {i+1} 层（{name}）分段 {j+1} 起始位置为负（{start}）")
+            if end <= start:
+                errors.append(f"第 {i+1} 层（{name}）分段 {j+1} 结束位置不大于起始位置（{start} → {end}）")
+            if end > L_total + 1e-6:
+                warnings.append(f"第 {i+1} 层（{name}）分段 {j+1} 结束位置 {end} 超出导管总长 {L_total}")
+
+            # 半径校验
+            if r_in < 0:
+                errors.append(f"第 {i+1} 层（{name}）分段 {j+1} 内半径为负（{r_in}）")
+            if r_out < 0:
+                errors.append(f"第 {i+1} 层（{name}）分段 {j+1} 外半径为负（{r_out}）")
+            if r_out <= r_in:
+                errors.append(f"第 {i+1} 层（{name}）分段 {j+1} 外半径不大于内半径（{r_in} → {r_out}）")
+
+    # 层间衔接检查（按外半径排序，检查相邻层）
+    # 对每个轴向采样点，检查该位置存在的所有层之间是否有重叠或间隙
+    sample_points = np.linspace(0, L_total, 100)
+    for x in sample_points:
+        active = []
+        for i, layer in enumerate(structure):
+            row = find_segment(layer['data'], x)
+            if row is not None:
+                active.append((i, layer['name'], row['内半径(mm)'], row['外半径(mm)']))
+
+        if not active:
+            continue
+
+        # 按内半径排序
+        active_sorted = sorted(active, key=lambda a: a[2])
+        for k in range(len(active_sorted) - 1):
+            i1, name1, ri1, ro1 = active_sorted[k]
+            i2, name2, ri2, ro2 = active_sorted[k + 1]
+
+            # 层1应该在外半径处衔接层2的内半径
+            gap = ri2 - ro1
+            if gap > 0.005:  # 间隙大于 5 µm 视为间隙
+                warnings.append(
+                    f"x = {x:.1f} mm 处：第 {i1+1} 层（{name1}）外半径 {ro1:.3f} 与 "
+                    f"第 {i2+1} 层（{name2}）内半径 {ri2:.3f} 之间存在间隙 {gap:.3f} mm"
+                )
+            elif gap < -0.005:  # 重叠超过 5 µm
+                warnings.append(
+                    f"x = {x:.1f} mm 处：第 {i1+1} 层（{name1}）外半径 {ro1:.3f} 与 "
+                    f"第 {i2+1} 层（{name2}）内半径 {ri2:.3f} 之间存在重叠 {-gap:.3f} mm"
+                )
+
+    # 去重（同一问题可能在多个采样点重复）
+    warnings = list(dict.fromkeys(warnings))
+    errors = list(dict.fromkeys(errors))
+    return errors, warnings
+
+# ==================== 分段查找 ====================
 def find_segment(df, x):
     if df is None or df.empty:
         return None
@@ -111,6 +187,7 @@ def find_hot_melt_E(structure, x):
     candidates.sort(key=lambda c: -c[0])
     return candidates[0][1]
 
+# ==================== 编织角自动计算 ====================
 def compute_braid_angle(r_in, r_out, PPI, N_strands):
     D_mid = r_in + r_out
     if N_strands <= 0 or D_mid <= 0:
@@ -118,6 +195,7 @@ def compute_braid_angle(r_in, r_out, PPI, N_strands):
     val = np.pi * D_mid * PPI / (25.4 * N_strands)
     return np.degrees(np.arctan(val))
 
+# ==================== 编织层各向异性模量与空隙计算 ====================
 def compute_braid_moduli(row, E_hm):
     if E_hm is None:
         E_hm = 0.0
@@ -145,6 +223,7 @@ def compute_braid_moduli(row, E_hm):
     E_theta = E_f * V_f * (np.sin(alpha_rad)**4) + E_m_eff * (1 - V_f)
     return E_z, E_theta, V_f, V_void, alpha
 
+# ==================== 弹簧圈各向异性模量与空隙计算 ====================
 def compute_coil_moduli(row, E_hm):
     if E_hm is None:
         E_hm = 0.0
@@ -177,6 +256,7 @@ def compute_coil_moduli(row, E_hm):
     E_theta = E_f * V_spring + E_m_eff * (1 - V_spring)
     return E_z, E_theta, V_spring, V_void
 
+# ==================== 截面生成 ====================
 def compute_at_x(structure, x):
     hot_melt_E = find_hot_melt_E(structure, x)
     layers = []
@@ -215,6 +295,7 @@ def compute_at_x(structure, x):
     layers.sort(key=lambda l: -l['r_out'])
     return layers
 
+# ==================== 刚度计算 ====================
 def compute_stiffness(layers):
     EA_c, EI_c, EI_theta_c = [], [], []
     for l in layers:
@@ -267,7 +348,7 @@ with st.sidebar:
     st.session_state.L_total = L_total
 
     st.markdown("**层顺序：列表第一个为最外层**")
-    st.info("热熔模量自动读取；编织角自动计算。图表中显示的层名请使用英文。")
+    st.info("热熔模量自动读取；编织角自动计算。")
 
     with st.expander("➕ 添加新层"):
         new_type = st.selectbox("层类型", list(LAYER_TYPES.keys()), key="new_type")
@@ -334,12 +415,26 @@ with st.sidebar:
         st.session_state.x_pos = 0.0
         st.rerun()
 
-# ==================== 主区域 ====================
+# ==================== 半径校验结果 ====================
 st.header("Catheter Multi-layer Stiffness Analysis")
 
 structure = st.session_state.structure
 L_total = st.session_state.L_total
 
+errors, warnings = validate_structure(structure, L_total)
+if errors:
+    with st.expander(f"❌ 发现 {len(errors)} 个错误（请修正后再使用）", expanded=True):
+        for e in errors:
+            st.error(e)
+if warnings:
+    with st.expander(f"⚠️ 发现 {len(warnings)} 个警告", expanded=False):
+        for w in warnings:
+            st.warning(w)
+
+if errors:
+    st.stop()
+
+# ==================== 主区域 ====================
 x_pos = st.slider("Axial position x (mm)", min_value=0.0, max_value=L_total,
                   value=st.session_state.x_pos, step=0.5)
 st.session_state.x_pos = x_pos
@@ -391,7 +486,7 @@ else:
     else:
         st.warning("未找到热熔层，渗入基体模量按 0 计算。")
 
-    # 截面图（层名来自用户输入，默认为英文）
+    # 截面图（无文字标注）
     st.subheader("Cross-section View")
     fig2, ax2 = plt.subplots(figsize=(5, 5))
     colors = plt.cm.tab10(np.linspace(0, 1, max(len(layers), 1)))
@@ -413,11 +508,6 @@ else:
     if inner_r > 0:
         ax2.add_patch(plt.Circle((0, 0), inner_r, color='white', fill=True))
 
-    for i, l in enumerate(layers):
-        r_mid = (l['r_in'] + l['r_out']) / 2
-        ax2.text(0, r_mid, l['name'], ha='center', va='center', fontsize=8,
-                 bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
-
     R_max = max(l['r_out'] for l in layers)
     ax2.set_xlim(-R_max*1.2, R_max*1.2)
     ax2.set_ylim(-R_max*1.2, R_max*1.2)
@@ -425,7 +515,7 @@ else:
     ax2.axis('off')
     st.pyplot(fig2)
 
-    # 百分比条形图（层名来自用户输入，默认为英文）
+    # 百分比条形图
     st.subheader("Layer Contributions (%)")
     labels = [l['name'] for l in layers]
     ea_pct = [v/EA*100 if EA > 0 else 0 for v in EA_c]
