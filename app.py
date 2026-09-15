@@ -287,69 +287,91 @@ def compute_at_x(structure, x):
     layers.sort(key=lambda l: -l['r_out'])
     return layers
 
-# ==================== 单层抗压扁刚度（含曲梁修正） ====================
+# ==================== 单层管壁刚度（曲梁修正） ====================
 def compute_wall_bending_stiffness(E_theta, r_in, r_out):
-    """
-    计算单层管壁对径压缩的弯曲刚度（单位轴向深度）。
-    使用曲梁理论，考虑中性轴偏移。
-    当 t/R 很小时自动退化为直梁公式 E·t³/12。
-    """
+    """管壁弯曲刚度，曲梁修正；薄壁时退化为 E·t³/12"""
     t = r_out - r_in
     if t <= 0:
         return 0.0
-    # 保护：r_in 太小或壁厚过大时，曲梁公式失效，退化为直梁
     if r_in <= 1e-9 or r_in / r_out < 0.5:
         return E_theta * t**3 / 12
-
-    r_n = t / np.log(r_out / r_in)   # 中性轴半径
-    R_layer = (r_out + r_in) / 2      # 层中面半径
-    e = R_layer - r_n                  # 中性轴偏移
-
-    # 曲梁弯曲刚度 EI = E · A · e · r_n，A = t（单位深度）
+    r_n = t / np.log(r_out / r_in)
+    R_layer = (r_out + r_in) / 2
+    e = R_layer - r_n
     return E_theta * t * e * r_n
 
-# ==================== 刚度计算 ====================
+def compute_wall_axial_stiffness(E_theta, r_in, r_out):
+    """管壁环向拉伸刚度"""
+    t = r_out - r_in
+    if t <= 0:
+        return 0.0
+    return E_theta * t
+
+# ==================== 刚度计算（自适应模型） ====================
 def compute_stiffness(layers):
     """
-    EA 与 EI 使用轴向模量 E_z 和全环惯性矩；
-    Kp 使用环向模量 E_θ 和曲梁修正的管壁弯曲刚度，
-    采用 Timoshenko 薄壁圆环对径压缩解，常数 = π/4 - 2/π ≈ 0.1488。
+    根据整体壁厚比 t/R 自动选择抗压扁模型：
+      t/R < 0.1：薄壁，纯弯曲模型
+      t/R >= 0.1：厚壁，弯曲 + 环向拉伸模型
     """
-    EA_c, EI_c, EI_theta_c = [], [], []
+    EA_c, EI_c = [], []
+    EI_theta_bend_c, EA_theta_c = [], []
+
     for l in layers:
         r_in, r_out = l['r_in'], l['r_out']
         E_z = l['E_z']
         E_theta = l.get('E_theta', E_z)
 
-        # 轴向刚度：全环截面积
         EA_c.append(np.pi * E_z * (r_out**2 - r_in**2))
-        # 弯曲刚度：全环惯性矩（梁弯曲）
         EI_c.append((np.pi / 4) * E_z * (r_out**4 - r_in**4))
-        # 抗压扁：曲梁修正的管壁弯曲刚度
-        EI_theta_c.append(compute_wall_bending_stiffness(E_theta, r_in, r_out))
+        EI_theta_bend_c.append(compute_wall_bending_stiffness(E_theta, r_in, r_out))
+        EA_theta_c.append(compute_wall_axial_stiffness(E_theta, r_in, r_out))
 
     EA = sum(EA_c)
     EI = sum(EI_c)
-    EI_theta = sum(EI_theta_c)
+    EI_theta_bend = sum(EI_theta_bend_c)
+    EA_theta = sum(EA_theta_c)
 
     if layers:
         r0 = min(l['r_in'] for l in layers)
         rn = max(l['r_out'] for l in layers)
         R = (r0 + rn) / 2
-        const = np.pi/4 - 2/np.pi   # ≈ 0.1488
-        Kp = EI_theta / (R**3 * const)
-        Kp_c = [ei / EI_theta * Kp for ei in EI_theta_c] if EI_theta > 0 else [0.0]*len(layers)
+        t_wall = rn - r0
+        thick_ratio = t_wall / R if R > 0 else 0
+        const = np.pi/4 - 2/np.pi
+
+        if thick_ratio < 0.1:
+            # 薄壁：纯弯曲
+            Kp = const * 0 + (EI_theta_bend / (R**3 * const)) if EI_theta_bend > 0 else 0.0
+            model_used = "thin-wall (bending only)"
+        else:
+            # 厚壁：弯曲 + 环向拉伸柔度相加
+            compliance = 0.0
+            if EI_theta_bend > 0:
+                compliance += const * R**3 / EI_theta_bend
+            if EA_theta > 0:
+                compliance += const * R / EA_theta
+            Kp = 1.0 / compliance if compliance > 0 else 0.0
+            model_used = "thick-wall (bending + hoop tension)"
+
+        if EI_theta_bend > 0:
+            Kp_c = [ei / EI_theta_bend * Kp for ei in EI_theta_bend_c]
+        else:
+            Kp_c = [0.0] * len(layers)
     else:
         Kp = 0.0
         Kp_c = []
-    return EA, EI, Kp, EA_c, EI_c, Kp_c
+        model_used = "N/A"
+        thick_ratio = 0.0
+
+    return EA, EI, Kp, EA_c, EI_c, Kp_c, model_used, thick_ratio
 
 def compute_along_length(structure, L_total, n=300):
     xs = np.linspace(0, L_total, n)
     EA_arr = np.zeros(n); EI_arr = np.zeros(n); Kp_arr = np.zeros(n)
     for i, x in enumerate(xs):
         layers = compute_at_x(structure, x)
-        EA, EI, Kp, _, _, _ = compute_stiffness(layers)
+        EA, EI, Kp, _, _, _, _, _ = compute_stiffness(layers)
         EA_arr[i] = EA; EI_arr[i] = EI; Kp_arr[i] = Kp
     return xs, EA_arr, EI_arr, Kp_arr
 
@@ -482,7 +504,7 @@ axes[1].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
 axes[2].plot(xs, Kp_arr, 'r-', linewidth=2)
 axes[2].set_ylabel('Crush Stiffness Kp (N/mm)')
 axes[2].set_xlabel('Axial position (mm)')
-axes[2].set_title('Crush Stiffness (uses E_theta, curved-beam wall)')
+axes[2].set_title('Crush Stiffness (auto-selected model)')
 axes[2].grid(True)
 axes[2].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
 
@@ -495,25 +517,26 @@ layers = compute_at_x(structure, x_pos)
 if not layers:
     st.warning("该位置没有层存在。")
 else:
-    EA, EI, Kp, EA_c, EI_c, Kp_c = compute_stiffness(layers)
+    EA, EI, Kp, EA_c, EI_c, Kp_c, model_used, thick_ratio = compute_stiffness(layers)
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Axial Stiffness EA", f"{EA:.2f} N")
     c2.metric("Total Bending Stiffness EI", f"{EI:.2f} N·mm²")
     c3.metric("Total Crush Stiffness Kp", f"{Kp:.2f} N/mm")
 
-    # 厚壁警告
-    if layers:
-        r0_w = min(l['r_in'] for l in layers)
-        rn_w = max(l['r_out'] for l in layers)
-        t_wall = rn_w - r0_w
-        R_w = (r0_w + rn_w) / 2
-        if R_w > 0 and t_wall / R_w > 0.1:
-            st.warning(
-                f"⚠️ 当前壁厚/半径比 = {t_wall/R_w:.2f} > 0.1。"
-                f"抗压扁刚度 Kp 使用曲梁修正，但在厚壁下仍可能有偏差"
-                f"（通常低估 2~4 倍）。如需精确值，建议有限元分析或实验标定。"
-            )
+    # 显示模型分类（用信息框）
+    if thick_ratio < 0.1:
+        st.info(
+            f"壁厚/半径比 = **{thick_ratio:.3f}** < 0.1（薄壁）。"
+            f"抗压扁模型：**{model_used}**。Timoshenko 薄环理论，精度高。"
+        )
+    else:
+        st.warning(
+            f"壁厚/半径比 = **{thick_ratio:.3f}** ≥ 0.1（厚壁）。"
+            f"抗压扁模型：**{model_used}**。"
+            f"已包含曲梁弯曲修正和环向拉伸，未包含剪切变形。"
+            f"在极厚壁下可能仍有 20~50% 偏差，建议有限元或实验标定。"
+        )
 
     hot_melt_E = find_hot_melt_E(structure, x_pos)
     if hot_melt_E is not None:
@@ -521,7 +544,7 @@ else:
     else:
         st.warning("未找到热熔层，渗入基体模量按 0 计算。")
 
-    # 截面图（无文字标注）
+    # 截面图
     st.subheader("Cross-section View")
     fig2, ax2 = plt.subplots(figsize=(5, 5))
     colors = plt.cm.tab10(np.linspace(0, 1, max(len(layers), 1)))
@@ -571,7 +594,7 @@ else:
     axes3[1].grid(axis='y', linestyle='--', alpha=0.6)
 
     axes3[2].bar(labels, kp_pct, color=colors)
-    axes3[2].set_title('Crush (Kp) - uses E_theta, curved beam')
+    axes3[2].set_title(f'Crush (Kp) - {model_used}')
     axes3[2].set_ylabel('Contribution (%)')
     axes3[2].grid(axis='y', linestyle='--', alpha=0.6)
 
