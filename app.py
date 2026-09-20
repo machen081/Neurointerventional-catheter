@@ -93,7 +93,7 @@ def normalize_structure(structure):
     return structure
 
 # ==================== 会话状态 ====================
-CURRENT_VERSION = "v7_full_strength"
+CURRENT_VERSION = "v8_return_sync"
 
 if 'structure_version' not in st.session_state or st.session_state.structure_version != CURRENT_VERSION:
     st.session_state.structure = create_default_structure()
@@ -109,13 +109,6 @@ if 'L_total' not in st.session_state: st.session_state.L_total = 30.0
 if 'x_pos' not in st.session_state: st.session_state.x_pos = 0.0
 if 'ea_correction' not in st.session_state: st.session_state.ea_correction = 1.0
 if 'kp_correction' not in st.session_state: st.session_state.kp_correction = 1.0
-
-# ==================== 回调 ====================
-def sync_editor_data(layer_idx):
-    key = f"data_{layer_idx}"
-    if key in st.session_state:
-        if 0 <= layer_idx < len(st.session_state.structure):
-            st.session_state.structure[layer_idx]['data'] = st.session_state[key]
 
 # ==================== 分段查找 ====================
 def find_segment(df, x):
@@ -364,15 +357,8 @@ def compute_stiffness(layers, ea_corr=1.0, kp_corr=1.0):
 
     return EA, EI, Kp, EA_c, EI_c, Kp_c, model_used, thick_ratio
 
-# ==================== 强度计算（三种模式） ====================
+# ==================== 强度计算 ====================
 def compute_strength(layers):
-    """
-    返回：
-      Fu: 最大轴向拉力 (N)
-      Mu: 最大弯曲力矩 (N·mm)
-      Fu_layer: 各层轴向拉力贡献
-      Mu_layer: 各层弯曲力矩贡献
-    """
     Fu_layer = []
     Mu_layer = []
     for l in layers:
@@ -381,7 +367,6 @@ def compute_strength(layers):
         I_i = np.pi / 4 * (r_out**4 - r_in**4)
         sigma_uts = l.get('sigma_uts', 0.0)
 
-        # 轴向拉力
         if l.get('Fu_override') is not None:
             Fu_layer.append(l['Fu_override'])
         else:
@@ -389,7 +374,6 @@ def compute_strength(layers):
             if V_f is None: V_f = 1.0
             Fu_layer.append(sigma_uts * A_i * V_f)
 
-        # 弯曲屈服力矩：M = σ · I / c，c = r_out（最外层纤维）
         if r_out > 0:
             Mu_layer.append(sigma_uts * I_i / r_out)
         else:
@@ -398,10 +382,6 @@ def compute_strength(layers):
     return sum(Fu_layer), sum(Mu_layer), Fu_layer, Mu_layer
 
 def compute_collapse_force(layers):
-    """
-    压扁屈服力：最外层（外半径最大）先屈服。
-    薄环对径压缩近似：F_c = σ · t² / (1.91 · R)
-    """
     if not layers:
         return 0.0, None
     sorted_layers = sorted(layers, key=lambda l: -l['r_out'])
@@ -482,14 +462,15 @@ with st.sidebar:
 
             st.caption(LAYER_TYPES[layer['type']]['caption'])
 
-            st.data_editor(
+            # 用返回值直接同步，不用 on_change
+            edited = st.data_editor(
                 layer['data'],
                 num_rows="dynamic",
                 use_container_width=True,
-                key=f"data_{i}",
-                on_change=sync_editor_data,
-                args=(i,)
+                key=f"data_{i}_v2"
             )
+            if edited is not None and not edited.empty:
+                layer['data'] = edited.copy()
 
     st.markdown("---")
     st.markdown("**刚度修正系数**")
@@ -508,6 +489,10 @@ with st.sidebar:
         st.rerun()
 
     if st.button("恢复示例数据"):
+        # 清除所有编辑器的缓存 key
+        for k in list(st.session_state.keys()):
+            if k.startswith("data_") or k.startswith("name_") or k.startswith("type_"):
+                del st.session_state[k]
         st.session_state.structure = create_default_structure(L_total)
         st.session_state.x_pos = 0.0
         st.session_state.ea_correction = 1.0
@@ -633,7 +618,7 @@ else:
         st.error(f"壁厚/半径比 = **{thick_ratio:.3f}** ≥ 0.5（极厚壁）。抗压扁模型：**{model_used}**。")
 
 # ============================================================
-# 第二部分：强度分析（三种模式）
+# 第二部分：强度分析
 # ============================================================
 st.markdown("---")
 st.markdown("## 二、Strength Analysis（强度分析）")
@@ -671,7 +656,6 @@ if layers:
     fig_t.tight_layout(rect=[0, 0, 1, 0.96])
     st.pyplot(fig_t)
 
-    # 强度贡献明细
     st.subheader("Strength Contribution per Layer")
     strength_rows = []
     for i, l in enumerate(layers):
@@ -693,7 +677,6 @@ if layers:
         })
     st.dataframe(pd.DataFrame(strength_rows), use_container_width=True)
 
-    # 压扁屈服说明
     if outer_layer is not None:
         st.info(
             f"压扁屈服由最外层（**{outer_layer['name']}**）控制。"
