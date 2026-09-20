@@ -4,66 +4,66 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
-st.set_page_config(page_title="微导管多层结构刚度分析", layout="wide")
+st.set_page_config(page_title="微导管多层结构刚度与强度分析", layout="wide")
 
 # ==================== 层类型定义 ====================
 LAYER_TYPES = {
     '普通材料': {
-        'columns': ['起始位置(mm)', '结束位置(mm)', '内半径(mm)', '外半径(mm)', '弹性模量(MPa)'],
-        'default': {'起始位置(mm)': 0.0, '结束位置(mm)': 350.0,
-                    '内半径(mm)': 0.40, '外半径(mm)': 0.45, '弹性模量(MPa)': 500.0},
+        'columns': ['起始位置(mm)', '结束位置(mm)', '内半径(mm)', '外半径(mm)', 
+                    '弹性模量(MPa)', '屈服强度(MPa)'],
+        'default': {'起始位置(mm)': 0.0, '结束位置(mm)': 30.0,
+                    '内半径(mm)': 0.27, '外半径(mm)': 0.3048, 
+                    '弹性模量(MPa)': 100.0, '屈服强度(MPa)': 80.5},
         'caption': '普通材料：各向同性，E_z = E_θ'
     },
     '编织层': {
         'columns': ['起始位置(mm)', '结束位置(mm)', '内半径(mm)', '外半径(mm)',
                     '扁丝宽度(mm)', '扁丝厚度(mm)', '股数', '每束根数',
-                    '每英寸交叉数', '丝材模量(MPa)', '原始基体体积分数'],
-        'default': {'起始位置(mm)': 0.0, '结束位置(mm)': 350.0,
-                    '内半径(mm)': 0.45, '外半径(mm)': 0.55,
+                    '每英寸交叉数', '丝材模量(MPa)', '丝材屈服强度(MPa)', '原始基体体积分数'],
+        'default': {'起始位置(mm)': 0.0, '结束位置(mm)': 30.0,
+                    '内半径(mm)': 0.3048, '外半径(mm)': 0.33,
                     '扁丝宽度(mm)': 0.05, '扁丝厚度(mm)': 0.02,
                     '股数': 16, '每束根数': 1, '每英寸交叉数': 80,
-                    '丝材模量(MPa)': 200000.0, '原始基体体积分数': 0.0},
+                    '丝材模量(MPa)': 193000.0, '丝材屈服强度(MPa)': 300.0, 
+                    '原始基体体积分数': 0.0},
         'caption': '编织层：无编织层的段自动用热熔材料填充'
     },
     '弹簧圈': {
         'columns': ['起始位置(mm)', '结束位置(mm)', '内半径(mm)', '外半径(mm)',
-                    '丝径(mm)', '螺距(mm)', '丝材模量(MPa)', '原始基体体积分数'],
-        'default': {'起始位置(mm)': 0.0, '结束位置(mm)': 350.0,
-                    '内半径(mm)': 0.42, '外半径(mm)': 0.45,
-                    '丝径(mm)': 0.02, '螺距(mm)': 0.10,
-                    '丝材模量(MPa)': 200000.0, '原始基体体积分数': 0.0},
+                    '丝径(mm)', '螺距(mm)', '丝材模量(MPa)', '丝材屈服强度(MPa)', '原始基体体积分数'],
+        'default': {'起始位置(mm)': 0.0, '结束位置(mm)': 30.0,
+                    '内半径(mm)': 0.3048, '外半径(mm)': 0.33,
+                    '丝径(mm)': 0.0254, '螺距(mm)': 7.75,
+                    '丝材模量(MPa)': 193000.0, '丝材屈服强度(MPa)': 300.0, 
+                    '原始基体体积分数': 0.0},
         'caption': '弹簧圈：无弹簧圈的段自动用热熔材料填充'
     },
 }
 
-def make_default_layer(layer_type, L_total=350, r_in=0.4, r_out=0.45):
+def make_default_layer(layer_type, L_total=30, r_in=0.27, r_out=0.3048):
     d = LAYER_TYPES[layer_type]['default'].copy()
     d['结束位置(mm)'] = L_total
     d['内半径(mm)'] = r_in
     d['外半径(mm)'] = r_out
     return pd.DataFrame([d])
 
-def create_default_structure(L_total=350):
+def create_default_structure(L_total=30):
+    """按照用户截图更新默认结构"""
     return [
         {'name': 'Hot Melt', 'type': '普通材料',
-         'data': pd.DataFrame([{'起始位置(mm)': 0.0, '结束位置(mm)': L_total,
-                                '内半径(mm)': 0.55, '外半径(mm)': 0.60,
-                                '弹性模量(MPa)': 50.0}])},
-        {'name': 'Braid', 'type': '编织层',
-         'data': pd.DataFrame([{'起始位置(mm)': 20.0, '结束位置(mm)': 300.0,
-                                '内半径(mm)': 0.45, '外半径(mm)': 0.55,
-                                '扁丝宽度(mm)': 0.05, '扁丝厚度(mm)': 0.02,
-                                '股数': 16, '每束根数': 1, '每英寸交叉数': 80,
-                                '丝材模量(MPa)': 200000.0, '原始基体体积分数': 0.0}])},
-        {'name': 'Coil', 'type': '弹簧圈',
-         'data': pd.DataFrame([{'起始位置(mm)': 50.0, '结束位置(mm)': 150.0,
-                                '内半径(mm)': 0.42, '外半径(mm)': 0.45,
-                                '丝径(mm)': 0.02, '螺距(mm)': 0.10,
-                                '丝材模量(MPa)': 200000.0, '原始基体体积分数': 0.0}])},
-        {'name': 'PTFE', 'type': '普通材料',
-         'data': pd.DataFrame([{'起始位置(mm)': 0.0, '结束位置(mm)': L_total,
-                                '内半径(mm)': 0.40, '外半径(mm)': 0.42,
-                                '弹性模量(MPa)': 500.0}])},
+         'data': pd.DataFrame([{'起始位置(mm)': 0.0, '结束位置(mm)': 30.0,
+                                '内半径(mm)': 0.33, '外半径(mm)': 0.4,
+                                '弹性模量(MPa)': 12.0, '屈服强度(MPa)': 10.0}])},
+        {'name': 'Braid', 'type': '弹簧圈',
+         'data': pd.DataFrame([{'起始位置(mm)': 0.0, '结束位置(mm)': 30.0,
+                                '内半径(mm)': 0.3048, '外半径(mm)': 0.33,
+                                '丝径(mm)': 0.0254, '螺距(mm)': 7.75,
+                                '丝材模量(MPa)': 193000.0, '丝材屈服强度(MPa)': 300.0, 
+                                '原始基体体积分数': 0.0}])},
+        {'name': 'Coil', 'type': '普通材料',
+         'data': pd.DataFrame([{'起始位置(mm)': 0.0, '结束位置(mm)': 30.0,
+                                '内半径(mm)': 0.27, '外半径(mm)': 0.3048,
+                                '弹性模量(MPa)': 100.0, '屈服强度(MPa)': 80.5}])},
     ]
 
 def normalize_structure(structure):
@@ -71,85 +71,22 @@ def normalize_structure(structure):
         expected_cols = LAYER_TYPES[layer['type']]['columns']
         df = layer['data']
         if list(df.columns) != expected_cols:
-            old = df.iloc[0].to_dict() if len(df) > 0 else {}
-            r_in = old.get('内半径(mm)', old.get('r_in', 0.4))
-            r_out = old.get('外半径(mm)', old.get('r_out', 0.45))
-            start = old.get('起始位置(mm)', old.get('start_x', 0.0))
-            end = old.get('结束位置(mm)', old.get('end_x', 350.0))
-            new_df = make_default_layer(layer['type'], end, r_in, r_out)
-            new_df.loc[0, '起始位置(mm)'] = start
-            layer['data'] = new_df
+            # 补齐缺失列
+            for col in expected_cols:
+                if col not in df.columns:
+                    if '屈服强度' in col:
+                        df[col] = 10.0 if layer['type'] == '普通材料' else 300.0
+                    else:
+                        df[col] = LAYER_TYPES[layer['type']]['default'].get(col, 0.0)
+            layer['data'] = df[expected_cols]
     return structure
 
-# ==================== 半径校验 ====================
-def validate_structure(structure, L_total):
-    errors = []
-    warnings = []
-
-    for i, layer in enumerate(structure):
-        df = layer['data']
-        name = layer['name']
-        if df is None or df.empty:
-            errors.append(f"第 {i+1} 层（{name}）没有任何分段数据")
-            continue
-
-        for j, row in df.iterrows():
-            try:
-                start = row['起始位置(mm)']
-                end = row['结束位置(mm)']
-                r_in = row['内半径(mm)']
-                r_out = row['外半径(mm)']
-            except KeyError:
-                errors.append(f"第 {i+1} 层（{name}）分段 {j+1} 缺少必要列")
-                continue
-
-            if start < 0:
-                errors.append(f"第 {i+1} 层（{name}）分段 {j+1} 起始位置为负（{start}）")
-            if end <= start:
-                errors.append(f"第 {i+1} 层（{name}）分段 {j+1} 结束位置不大于起始位置（{start} → {end}）")
-            if end > L_total + 1e-6:
-                warnings.append(f"第 {i+1} 层（{name}）分段 {j+1} 结束位置 {end} 超出导管总长 {L_total}")
-
-            if r_in < 0:
-                errors.append(f"第 {i+1} 层（{name}）分段 {j+1} 内半径为负（{r_in}）")
-            if r_out < 0:
-                errors.append(f"第 {i+1} 层（{name}）分段 {j+1} 外半径为负（{r_out}）")
-            if r_out <= r_in:
-                errors.append(f"第 {i+1} 层（{name}）分段 {j+1} 外半径不大于内半径（{r_in} → {r_out}）")
-
-    sample_points = np.linspace(0, L_total, 100)
-    for x in sample_points:
-        active = []
-        for i, layer in enumerate(structure):
-            row = find_segment(layer['data'], x)
-            if row is not None:
-                active.append((i, layer['name'], layer['type'],
-                               row['内半径(mm)'], row['外半径(mm)']))
-
-        if not active:
-            continue
-
-        active_sorted = sorted(active, key=lambda a: a[3])
-        for k in range(len(active_sorted) - 1):
-            i1, name1, type1, ri1, ro1 = active_sorted[k]
-            i2, name2, type2, ri2, ro2 = active_sorted[k + 1]
-
-            gap = ri2 - ro1
-            if gap > 0.005:
-                # 判断缺失的是哪种层，可能是编织层或弹簧圈
-                msg = (f"x = {x:.1f} mm 处：第 {i1+1} 层（{name1}）外半径 {ro1:.3f} 与 "
-                       f"第 {i2+1} 层（{name2}）内半径 {ri2:.3f} 之间存在间隙 {gap:.3f} mm"
-                       f"（若该段缺编织层或弹簧圈，计算时将由热熔材料自动填充）")
-                warnings.append(msg)
-            elif gap < -0.005:
-                warnings.append(
-                    f"x = {x:.1f} mm 处：第 {i1+1} 层（{name1}）外半径 {ro1:.3f} 与 "
-                    f"第 {i2+1} 层（{name2}）内半径 {ri2:.3f} 之间存在重叠 {-gap:.3f} mm"
-                )
-
-    warnings = list(dict.fromkeys(warnings))
-    errors = list(dict.fromkeys(errors))
-    return errors, warnings
+# ==================== 回调函数 ====================
+def sync_editor_data(layer_idx, editor_key):
+    """当 data_editor 发生改变时，强制把最新数据写回 session_state"""
+    if editor_key in st.session_state:
+        if 0 <= layer_idx < len(st.session_state.structure):
+            st.session_state.structure[layer_idx]['data'] = st.session_state[editor_key]
 
 # ==================== 分段查找 ====================
 def find_segment(df, x):
@@ -181,12 +118,8 @@ def find_hot_melt_E(structure, x):
     candidates.sort(key=lambda c: -c[0])
     return candidates[0][1]
 
-# ==================== 参考半径提取（通用函数） ====================
+# ==================== 参考半径提取 ====================
 def get_reference_radius(structure, layer_type_name):
-    """
-    从指定类型的所有分段中提取参考半径范围（中位数）。
-    返回 (r_in_ref, r_out_ref) 或 None。
-    """
     refs = []
     for layer in structure:
         if layer['type'] != layer_type_name:
@@ -203,9 +136,7 @@ def get_reference_radius(structure, layer_type_name):
                 continue
     if not refs:
         return None
-    r_in_med = float(np.median([r[0] for r in refs]))
-    r_out_med = float(np.median([r[1] for r in refs]))
-    return (r_in_med, r_out_med)
+    return (float(np.median([r[0] for r in refs])), float(np.median([r[1] for r in refs])))
 
 # ==================== 编织角自动计算 ====================
 def compute_braid_angle(r_in, r_out, PPI, N_strands):
@@ -276,7 +207,7 @@ def compute_coil_moduli(row, E_hm):
     E_theta = E_f * V_spring + E_m_eff * (1 - V_spring)
     return E_z, E_theta, V_spring, V_void
 
-# ==================== 截面生成（含编织层/弹簧圈缺失段自动填充） ====================
+# ==================== 截面生成 ====================
 def compute_at_x(structure, x):
     hot_melt_E = find_hot_melt_E(structure, x)
     layers = []
@@ -288,45 +219,36 @@ def compute_at_x(structure, x):
         if row is None:
             continue
         ltype = layer['type']
-        if ltype == '编织层':
-            has_braid_here = True
-        elif ltype == '弹簧圈':
-            has_coil_here = True
+        if ltype == '编织层': has_braid_here = True
+        elif ltype == '弹簧圈': has_coil_here = True
         try:
-            alpha = None
-            V_void = None
+            alpha = None; V_void = None
             if ltype == '普通材料':
                 E_z = row['弹性模量(MPa)']
                 E_theta = E_z
                 V_f = None
+                sigma_y = row.get('屈服强度(MPa)', 0.0)
             elif ltype == '编织层':
                 E_z, E_theta, V_f, V_void, alpha = compute_braid_moduli(row, hot_melt_E)
+                sigma_y = row.get('丝材屈服强度(MPa)', 0.0)
             elif ltype == '弹簧圈':
                 E_z, E_theta, V_f, V_void = compute_coil_moduli(row, hot_melt_E)
+                sigma_y = row.get('丝材屈服强度(MPa)', 0.0)
             else:
                 continue
         except KeyError:
             continue
         layers.append({
-            'name': layer['name'],
-            'type': ltype,
-            'r_in': row['内半径(mm)'],
-            'r_out': row['外半径(mm)'],
-            'E_z': E_z,
-            'E_theta': E_theta,
-            'V_f': V_f,
-            'V_void': V_void,
-            'alpha': alpha,
-            'layer_idx': idx,
-            'is_filler': False
+            'name': layer['name'], 'type': ltype,
+            'r_in': row['内半径(mm)'], 'r_out': row['外半径(mm)'],
+            'E_z': E_z, 'E_theta': E_theta, 'V_f': V_f, 'V_void': V_void, 
+            'alpha': alpha, 'sigma_y': sigma_y, 'layer_idx': idx, 'is_filler': False
         })
 
-    # 辅助函数：检查给定半径范围是否与现有层实质性重叠（重叠宽度 > 5 µm）
     def is_occupied(r_in_ref, r_out_ref, tol=0.005):
         for l in layers:
             overlap = min(r_out_ref, l['r_out']) - max(r_in_ref, l['r_in'])
-            if overlap > tol:
-                return True
+            if overlap > tol: return True
         return False
 
     # 编织层缺失 → 热熔填充
@@ -336,17 +258,11 @@ def compute_at_x(structure, x):
             r_in_ref, r_out_ref = braid_ref
             if not is_occupied(r_in_ref, r_out_ref):
                 layers.append({
-                    'name': 'Hot Melt (braid filler)',
-                    'type': '普通材料',
-                    'r_in': r_in_ref,
-                    'r_out': r_out_ref,
-                    'E_z': hot_melt_E,
-                    'E_theta': hot_melt_E,
-                    'V_f': None,
-                    'V_void': None,
-                    'alpha': None,
-                    'layer_idx': -2,
-                    'is_filler': True
+                    'name': 'Hot Melt (braid filler)', 'type': '普通材料',
+                    'r_in': r_in_ref, 'r_out': r_out_ref,
+                    'E_z': hot_melt_E, 'E_theta': hot_melt_E,
+                    'V_f': None, 'V_void': None, 'alpha': None, 'sigma_y': 10.0,
+                    'layer_idx': -2, 'is_filler': True
                 })
 
     # 弹簧圈缺失 → 热熔填充
@@ -356,27 +272,20 @@ def compute_at_x(structure, x):
             r_in_ref, r_out_ref = coil_ref
             if not is_occupied(r_in_ref, r_out_ref):
                 layers.append({
-                    'name': 'Hot Melt (coil filler)',
-                    'type': '普通材料',
-                    'r_in': r_in_ref,
-                    'r_out': r_out_ref,
-                    'E_z': hot_melt_E,
-                    'E_theta': hot_melt_E,
-                    'V_f': None,
-                    'V_void': None,
-                    'alpha': None,
-                    'layer_idx': -1,
-                    'is_filler': True
+                    'name': 'Hot Melt (coil filler)', 'type': '普通材料',
+                    'r_in': r_in_ref, 'r_out': r_out_ref,
+                    'E_z': hot_melt_E, 'E_theta': hot_melt_E,
+                    'V_f': None, 'V_void': None, 'alpha': None, 'sigma_y': 10.0,
+                    'layer_idx': -1, 'is_filler': True
                 })
 
     layers.sort(key=lambda l: -l['r_out'])
     return layers
 
-# ==================== 单层管壁刚度（曲梁修正） ====================
+# ==================== 单层管壁刚度 ====================
 def compute_wall_bending_stiffness(E_theta, r_in, r_out):
     t = r_out - r_in
-    if t <= 0:
-        return 0.0
+    if t <= 0: return 0.0
     if r_in <= 1e-9 or r_in / r_out < 0.5:
         return E_theta * t**3 / 12
     r_n = t / np.log(r_out / r_in)
@@ -386,26 +295,30 @@ def compute_wall_bending_stiffness(E_theta, r_in, r_out):
 
 def compute_wall_axial_stiffness(E_theta, r_in, r_out):
     t = r_out - r_in
-    if t <= 0:
-        return 0.0
+    if t <= 0: return 0.0
     return E_theta * t
 
-# ==================== 刚度计算（自适应模型） ====================
+# ==================== 刚度与屈服力计算 ====================
 def compute_stiffness(layers, correction_factor=1.0):
     EA_c, EI_c = [], []
     EI_theta_bend_c, EA_theta_c = [], []
+    F_yield = 0.0
 
     for l in layers:
         r_in, r_out = l['r_in'], l['r_out']
-        E_z = l['E_z']
-        E_theta = l.get('E_theta', E_z)
-
-        EA_c.append(np.pi * E_z * (r_out**2 - r_in**2))
+        E_z = l['E_z']; E_theta = l.get('E_theta', E_z)
+        A_i = np.pi * (r_out**2 - r_in**2)
+        
+        EA_c.append(E_z * A_i)
         EI_c.append((np.pi / 4) * E_z * (r_out**4 - r_in**4))
         EI_theta_bend_c.append(compute_wall_bending_stiffness(E_theta, r_in, r_out))
         EA_theta_c.append(compute_wall_axial_stiffness(E_theta, r_in, r_out))
+        
+        V_f = l.get('V_f')
+        if V_f is None: V_f = 1.0
+        F_yield += l.get('sigma_y', 0.0) * A_i * V_f
 
-    EA = sum(EA_c)
+    EA = sum(EA_c) * correction_factor
     EI = sum(EI_c)
     EI_theta_bend = sum(EI_theta_bend_c)
     EA_theta = sum(EA_theta_c)
@@ -414,87 +327,67 @@ def compute_stiffness(layers, correction_factor=1.0):
         r0 = min(l['r_in'] for l in layers)
         rn = max(l['r_out'] for l in layers)
         R = (r0 + rn) / 2
-        t_wall = rn - r0
-        thick_ratio = t_wall / R if R > 0 else 0
+        thick_ratio = (rn - r0) / R if R > 0 else 0
         const = np.pi/4 - 2/np.pi
 
         if thick_ratio < 0.1:
             Kp_raw = EI_theta_bend / (R**3 * const) if EI_theta_bend > 0 else 0.0
-            model_used = "thin-wall (bending only)"
+            model_used = "thin-wall"
         else:
             compliance = 0.0
-            if EI_theta_bend > 0:
-                compliance += const * R**3 / EI_theta_bend
-            if EA_theta > 0:
-                compliance += const * R / EA_theta
+            if EI_theta_bend > 0: compliance += const * R**3 / EI_theta_bend
+            if EA_theta > 0: compliance += const * R / EA_theta
             Kp_raw = 1.0 / compliance if compliance > 0 else 0.0
-            if thick_ratio < 0.5:
-                model_used = "thick-wall (bending + hoop tension)"
-            else:
-                model_used = "very thick wall (approximate)"
+            model_used = "thick-wall"
 
         Kp = Kp_raw * correction_factor
-
-        if EI_theta_bend > 0:
-            Kp_c = [ei / EI_theta_bend * Kp for ei in EI_theta_bend_c]
-        else:
-            Kp_c = [0.0] * len(layers)
+        Kp_c = [ei / EI_theta_bend * Kp for ei in EI_theta_bend_c] if EI_theta_bend > 0 else [0.0]*len(layers)
     else:
-        Kp = 0.0
-        Kp_c = []
-        model_used = "N/A"
-        thick_ratio = 0.0
+        Kp = 0.0; Kp_c = []; model_used = "N/A"; thick_ratio = 0.0
 
-    return EA, EI, Kp, EA_c, EI_c, Kp_c, model_used, thick_ratio
+    return EA, EI, Kp, F_yield, EA_c, EI_c, Kp_c, model_used, thick_ratio
 
-def compute_along_length(structure, L_total, correction_factor=1.0, n=300):
+def compute_along_length(structure, L_total, ea_corr=1.0, kp_corr=1.0, n=300):
     xs = np.linspace(0, L_total, n)
-    EA_arr = np.zeros(n); EI_arr = np.zeros(n); Kp_arr = np.zeros(n)
+    EA_arr = np.zeros(n); EI_arr = np.zeros(n); Kp_arr = np.zeros(n); Fy_arr = np.zeros(n)
     for i, x in enumerate(xs):
         layers = compute_at_x(structure, x)
-        EA, EI, Kp, _, _, _, _, _ = compute_stiffness(layers, correction_factor)
-        EA_arr[i] = EA; EI_arr[i] = EI; Kp_arr[i] = Kp
-    return xs, EA_arr, EI_arr, Kp_arr
+        EA, EI, Kp, Fy, _, _, _, _, _ = compute_stiffness(layers, kp_corr)
+        EA_arr[i] = EA; EI_arr[i] = EI; Kp_arr[i] = Kp; Fy_arr[i] = Fy
+    return xs, EA_arr, EI_arr, Kp_arr, Fy_arr
 
 # ==================== 会话状态 ====================
 if 'structure' not in st.session_state:
     st.session_state.structure = create_default_structure()
 else:
     st.session_state.structure = normalize_structure(st.session_state.structure)
-if 'L_total' not in st.session_state:
-    st.session_state.L_total = 350.0
-if 'x_pos' not in st.session_state:
-    st.session_state.x_pos = 0.0
-if 'kp_correction' not in st.session_state:
-    st.session_state.kp_correction = 1.0
+if 'L_total' not in st.session_state: st.session_state.L_total = 30.0
+if 'x_pos' not in st.session_state: st.session_state.x_pos = 0.0
+if 'ea_correction' not in st.session_state: st.session_state.ea_correction = 0.5
+if 'kp_correction' not in st.session_state: st.session_state.kp_correction = 1.0
 
 # ==================== 侧边栏 ====================
 with st.sidebar:
     st.header("导管结构定义")
-    L_total = st.number_input("导管总长度 (mm)", min_value=1.0,
-                              value=st.session_state.L_total, step=10.0)
+    L_total = st.number_input("导管总长度 (mm)", min_value=1.0, value=st.session_state.L_total, step=10.0)
     st.session_state.L_total = L_total
 
     st.markdown("**层顺序：列表第一个为最外层**")
 
     with st.expander("➕ 添加新层"):
         new_type = st.selectbox("层类型", list(LAYER_TYPES.keys()), key="new_type")
-        insert_pos = st.number_input("插入位置（0=最外，末尾=最内）",
-                                     min_value=0,
+        insert_pos = st.number_input("插入位置（0=最外，末尾=最内）", min_value=0, 
                                      max_value=len(st.session_state.structure),
-                                     value=len(st.session_state.structure),
-                                     step=1, key="insert_pos")
+                                     value=len(st.session_state.structure), step=1, key="insert_pos")
         if st.button("添加层", key="add_layer_btn"):
             if st.session_state.structure:
                 r_out_ref = st.session_state.structure[0]['data'].iloc[0]['外半径(mm)']
                 r_in_ref = st.session_state.structure[-1]['data'].iloc[0]['内半径(mm)']
             else:
-                r_out_ref, r_in_ref = 0.6, 0.4
-            new_layer = {
-                'name': f'Layer {len(st.session_state.structure)+1}',
-                'type': new_type,
-                'data': make_default_layer(new_type, L_total, r_in_ref, r_out_ref)
-            }
+                r_out_ref, r_in_ref = 0.4, 0.27
+            new_layer = {'name': f'Layer {len(st.session_state.structure)+1}',
+                         'type': new_type,
+                         'data': make_default_layer(new_type, L_total, r_in_ref, r_out_ref)}
             st.session_state.structure.insert(int(insert_pos), new_layer)
             st.rerun()
 
@@ -505,20 +398,14 @@ with st.sidebar:
         with st.expander(f"第{i+1}层：{layer['name']}（{layer['type']}）", expanded=False):
             col1, col2, col3 = st.columns([2, 2, 1])
             with col1:
-                layer['name'] = st.text_input("名称（图表中显示）", value=layer['name'],
-                                              key=f"name_{i}")
+                layer['name'] = st.text_input("名称（图表中显示）", value=layer['name'], key=f"name_{i}")
             with col2:
-                new_type = st.selectbox(
-                    "类型", list(LAYER_TYPES.keys()),
-                    index=list(LAYER_TYPES.keys()).index(layer['type']),
-                    key=f"type_{i}"
-                )
+                new_type = st.selectbox("类型", list(LAYER_TYPES.keys()),
+                                        index=list(LAYER_TYPES.keys()).index(layer['type']), key=f"type_{i}")
                 if new_type != layer['type']:
                     old = layer['data'].iloc[0].to_dict() if len(layer['data']) > 0 else {}
-                    r_in = old.get('内半径(mm)', 0.4)
-                    r_out = old.get('外半径(mm)', 0.45)
-                    start = old.get('起始位置(mm)', 0.0)
-                    end = old.get('结束位置(mm)', L_total)
+                    r_in = old.get('内半径(mm)', 0.27); r_out = old.get('外半径(mm)', 0.3048)
+                    start = old.get('起始位置(mm)', 0.0); end = old.get('结束位置(mm)', L_total)
                     layer['type'] = new_type
                     layer['data'] = make_default_layer(new_type, end, r_in, r_out)
                     layer['data'].loc[0, '起始位置(mm)'] = start
@@ -529,81 +416,80 @@ with st.sidebar:
                     st.rerun()
 
             st.caption(LAYER_TYPES[layer['type']]['caption'])
-            layer['data'] = st.data_editor(
-                layer['data'],
-                num_rows="dynamic",
-                use_container_width=True,
-                key=f"data_{i}"
+            
+            st.data_editor(
+                layer['data'], 
+                num_rows="dynamic", 
+                use_container_width=True, 
+                key=f"data_{i}",
+                on_change=sync_editor_data,
+                args=(i, f"data_{i}")
             )
 
     st.markdown("---")
-    st.markdown("**抗压扁刚度修正**")
-    kp_correction = st.number_input(
-        "Kp 修正系数（理论值 × 系数 = 报告值）",
-        min_value=0.01, max_value=10.0,
-        value=float(st.session_state.kp_correction),
-        step=0.01, format="%.3f",
-        key="kp_correction_input"
-    )
+    st.markdown("**刚度与强度修正系数**")
+    ea_correction = st.number_input("轴向刚度 EA 修正系数（实验标定）", 
+                                    min_value=0.01, max_value=2.0, 
+                                    value=float(st.session_state.ea_correction), 
+                                    step=0.05, format="%.2f", key="ea_corr_input")
+    st.session_state.ea_correction = ea_correction
+    
+    kp_correction = st.number_input("抗压扁刚度 Kp 修正系数（实验标定）", 
+                                    min_value=0.01, max_value=10.0, 
+                                    value=float(st.session_state.kp_correction), 
+                                    step=0.01, format="%.3f", key="kp_corr_input")
     st.session_state.kp_correction = kp_correction
-    st.caption("默认 1.000（不修正）。若做过实验或有限元标定，填入实测值/理论值。")
+    
+    st.caption("默认 EA 修正 0.5（考虑层间滑移与尺寸效应），Kp 修正 1.0。")
 
     st.markdown("---")
+    if st.button("🔄 强制刷新计算并更新图表", type="primary"):
+        st.rerun()
+
     if st.button("恢复示例数据"):
         st.session_state.structure = create_default_structure(L_total)
         st.session_state.x_pos = 0.0
+        st.session_state.ea_correction = 0.5
         st.session_state.kp_correction = 1.0
         st.rerun()
 
-# ==================== 半径校验结果 ====================
-st.header("Catheter Multi-layer Stiffness Analysis")
+# ==================== 主区域 ====================
+st.header("微导管多层结构刚度与屈服强度分析")
 
 structure = st.session_state.structure
 L_total = st.session_state.L_total
+ea_correction = st.session_state.ea_correction
 kp_correction = st.session_state.kp_correction
 
-errors, warnings = validate_structure(structure, L_total)
-if errors:
-    with st.expander(f"❌ 发现 {len(errors)} 个错误（请修正后再使用）", expanded=True):
-        for e in errors:
-            st.error(e)
-if warnings:
-    with st.expander(f"⚠️ 发现 {len(warnings)} 个警告", expanded=False):
-        for w in warnings:
-            st.warning(w)
-
-if errors:
-    st.stop()
-
-# ==================== 主区域 ====================
-x_pos = st.slider("Axial position x (mm)", min_value=0.0, max_value=L_total,
-                  value=st.session_state.x_pos, step=0.5)
+x_pos = st.slider("Axial position x (mm)", min_value=0.0, max_value=L_total, value=st.session_state.x_pos, step=0.5)
 st.session_state.x_pos = x_pos
 
-xs, EA_arr, EI_arr, Kp_arr = compute_along_length(structure, L_total, kp_correction)
+xs, EA_arr, EI_arr, Kp_arr, Fy_arr = compute_along_length(structure, L_total, ea_correction, kp_correction)
 
-st.subheader("Stiffness along Length")
-fig, axes = plt.subplots(3, 1, figsize=(10, 12))
-fig.suptitle("Stiffness Distribution along Catheter Length", y=0.98, fontsize=14)
+st.subheader("Stiffness & Yield Force along Length")
+fig, axes = plt.subplots(4, 1, figsize=(10, 16))
+fig.suptitle("Stiffness and Yield Force Distribution", y=0.98, fontsize=14)
 
 axes[0].plot(xs, EA_arr, 'b-', linewidth=2)
 axes[0].set_ylabel('Axial Stiffness EA (N)')
-axes[0].set_title('Axial Stiffness (uses E_z)')
-axes[0].grid(True)
-axes[0].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
+axes[0].set_title('Axial Stiffness (corrected)')
+axes[0].grid(True); axes[0].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
 
-axes[1].plot(xs, EI_arr, 'g-', linewidth=2)
-axes[1].set_ylabel('Bending Stiffness EI (N·mm²)')
-axes[1].set_title('Bending Stiffness (uses E_z)')
-axes[1].grid(True)
-axes[1].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
+axes[1].plot(xs, Fy_arr, 'm-', linewidth=2)
+axes[1].set_ylabel('Axial Yield Force Fy (N)')
+axes[1].set_title('Max Axial Yield Force (Theoretical)')
+axes[1].grid(True); axes[1].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
 
-axes[2].plot(xs, Kp_arr, 'r-', linewidth=2)
-axes[2].set_ylabel('Crush Stiffness Kp (N/mm)')
-axes[2].set_xlabel('Axial position (mm)')
-axes[2].set_title(f'Crush Stiffness (correction × {kp_correction:.3f})')
-axes[2].grid(True)
-axes[2].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
+axes[2].plot(xs, EI_arr, 'g-', linewidth=2)
+axes[2].set_ylabel('Bending Stiffness EI (N·mm²)')
+axes[2].set_title('Bending Stiffness')
+axes[2].grid(True); axes[2].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
+
+axes[3].plot(xs, Kp_arr, 'r-', linewidth=2)
+axes[3].set_ylabel('Crush Stiffness Kp (N/mm)')
+axes[3].set_xlabel('Axial position (mm)')
+axes[3].set_title(f'Crush Stiffness (correction × {kp_correction:.3f})')
+axes[3].grid(True); axes[3].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
 
 fig.tight_layout(rect=[0, 0, 1, 0.96])
 st.pyplot(fig)
@@ -614,133 +500,67 @@ layers = compute_at_x(structure, x_pos)
 if not layers:
     st.warning("该位置没有层存在。")
 else:
-    EA, EI, Kp, EA_c, EI_c, Kp_c, model_used, thick_ratio = compute_stiffness(layers, kp_correction)
+    EA, EI, Kp, Fy, EA_c, EI_c, Kp_c, model_used, thick_ratio = compute_stiffness(layers, kp_correction)
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total Axial Stiffness EA", f"{EA:.2f} N")
-    c2.metric("Total Bending Stiffness EI", f"{EI:.2f} N·mm²")
-    c3.metric("Total Crush Stiffness Kp", f"{Kp:.2f} N/mm")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Axial Stiffness EA", f"{EA:.2f} N")
+    c2.metric("Bending Stiffness EI", f"{EI:.2f} N·mm²")
+    c3.metric("Crush Stiffness Kp", f"{Kp:.2f} N/mm")
+    c4.metric("Max Axial Yield Force Fy", f"{Fy:.2f} N")
 
-    # 提示：当前位置是否有热熔填充
     filler_names = [l['name'] for l in layers if l.get('is_filler', False)]
     if filler_names:
         st.info(f"当前段缺失的层已自动用热熔材料填充：{', '.join(filler_names)}。")
 
-    # 三档壁厚提示
     if thick_ratio < 0.1:
-        st.info(
-            f"壁厚/半径比 = **{thick_ratio:.3f}** < 0.1（薄壁）。"
-            f"抗压扁模型：**{model_used}**。Timoshenko 薄环理论，精度高（偏差 < 5%）。"
-            f"当前修正系数：**{kp_correction:.3f}**。"
-        )
+        st.info(f"壁厚/半径比 = **{thick_ratio:.3f}** < 0.1（薄壁）。抗压扁模型：**{model_used}**。")
     elif thick_ratio < 0.5:
-        st.warning(
-            f"壁厚/半径比 = **{thick_ratio:.3f}** ∈ [0.1, 0.5)（厚壁）。"
-            f"抗压扁模型：**{model_used}**。"
-            f"已包含曲梁弯曲修正和环向拉伸。环向拉伸贡献较小（< 5%），"
-            f"主要偏差来自未包含的剪切变形和厚环常数修正，预计 10~40%。"
-            f"建议实验或有限元标定修正系数。"
-            f"当前修正系数：**{kp_correction:.3f}**。"
-        )
+        st.warning(f"壁厚/半径比 = **{thick_ratio:.3f}** ∈ [0.1, 0.5)（厚壁）。抗压扁模型：**{model_used}**。")
     else:
-        st.error(
-            f"壁厚/半径比 = **{thick_ratio:.3f}** ≥ 0.5（极厚壁）。"
-            f"抗压扁模型：**{model_used}**。"
-            f"当前解析模型为近似估计，预计偏差 40~60%。"
-            f"强烈建议有限元或实验标定后填入修正系数。"
-            f"当前修正系数：**{kp_correction:.3f}**。"
-        )
+        st.error(f"壁厚/半径比 = **{thick_ratio:.3f}** ≥ 0.5（极厚壁）。抗压扁模型：**{model_used}**。")
 
-    hot_melt_E = find_hot_melt_E(structure, x_pos)
-    if hot_melt_E is not None:
-        st.info(f"当前位置热熔层模量：{hot_melt_E:.1f} MPa（自动作为编织层和弹簧圈的渗入基体）")
-    else:
-        st.warning("未找到热熔层，渗入基体模量按 0 计算。")
-
-    # 截面图
     st.subheader("Cross-section View")
     fig2, ax2 = plt.subplots(figsize=(5, 5))
     colors = plt.cm.tab10(np.linspace(0, 1, max(len(layers), 1)))
-
     for i, l in enumerate(layers):
         r_in, r_out = l['r_in'], l['r_out']
         ax2.add_patch(plt.Circle((0, 0), r_out, color=colors[i], alpha=0.6))
         ax2.add_patch(plt.Circle((0, 0), r_in, color='white', fill=True))
         if l['type'] == '编织层':
-            ax2.add_patch(mpatches.Wedge((0, 0), r_out, 0, 360,
-                                         width=r_out - r_in,
-                                         fill=False, hatch='///', edgecolor='none'))
+            ax2.add_patch(mpatches.Wedge((0, 0), r_out, 0, 360, width=r_out - r_in, fill=False, hatch='///', edgecolor='none'))
         elif l['type'] == '弹簧圈':
-            ax2.add_patch(mpatches.Wedge((0, 0), r_out, 0, 360,
-                                         width=r_out - r_in,
-                                         fill=False, hatch='xxx', edgecolor='none'))
+            ax2.add_patch(mpatches.Wedge((0, 0), r_out, 0, 360, width=r_out - r_in, fill=False, hatch='xxx', edgecolor='none'))
         elif l.get('is_filler', False):
-            ax2.add_patch(mpatches.Wedge((0, 0), r_out, 0, 360,
-                                         width=r_out - r_in,
-                                         fill=False, hatch='...', edgecolor='none'))
+            ax2.add_patch(mpatches.Wedge((0, 0), r_out, 0, 360, width=r_out - r_in, fill=False, hatch='...', edgecolor='none'))
 
     inner_r = min(l['r_in'] for l in layers)
     if inner_r > 0:
         ax2.add_patch(plt.Circle((0, 0), inner_r, color='white', fill=True))
-
     R_max = max(l['r_out'] for l in layers)
-    ax2.set_xlim(-R_max*1.2, R_max*1.2)
-    ax2.set_ylim(-R_max*1.2, R_max*1.2)
-    ax2.set_aspect('equal')
-    ax2.axis('off')
+    ax2.set_xlim(-R_max*1.2, R_max*1.2); ax2.set_ylim(-R_max*1.2, R_max*1.2)
+    ax2.set_aspect('equal'); ax2.axis('off')
     st.pyplot(fig2)
 
-    # 百分比条形图
-    st.subheader("Layer Contributions (%)")
+    st.subheader("Layer Contributions to EA (%)")
     labels = [l['name'] for l in layers]
     ea_pct = [v/EA*100 if EA > 0 else 0 for v in EA_c]
-    ei_pct = [v/EI*100 if EI > 0 else 0 for v in EI_c]
-    kp_pct = [v/Kp*100 if Kp > 0 else 0 for v in Kp_c]
-
-    fig3, axes3 = plt.subplots(1, 3, figsize=(15, 4))
-    fig3.suptitle("Layer Contributions to Stiffness (%)", y=1.02, fontsize=13)
-
-    axes3[0].bar(labels, ea_pct, color=colors)
-    axes3[0].set_title('Axial (EA) - uses E_z')
-    axes3[0].set_ylabel('Contribution (%)')
-    axes3[0].grid(axis='y', linestyle='--', alpha=0.6)
-
-    axes3[1].bar(labels, ei_pct, color=colors)
-    axes3[1].set_title('Bending (EI) - uses E_z')
-    axes3[1].set_ylabel('Contribution (%)')
-    axes3[1].grid(axis='y', linestyle='--', alpha=0.6)
-
-    axes3[2].bar(labels, kp_pct, color=colors)
-    axes3[2].set_title(f'Crush (Kp) - {model_used}')
-    axes3[2].set_ylabel('Contribution (%)')
-    axes3[2].grid(axis='y', linestyle='--', alpha=0.6)
-
-    fig3.tight_layout(rect=[0, 0, 1, 0.95])
+    
+    fig3, ax3 = plt.subplots(figsize=(8, 4))
+    ax3.bar(labels, ea_pct, color=colors[:len(layers)])
+    ax3.set_ylabel('Contribution to EA (%)')
+    ax3.grid(axis='y', linestyle='--', alpha=0.6)
     st.pyplot(fig3)
-
-    st.subheader("Contribution Summary")
-    contrib_df = pd.DataFrame({
-        "Layer": labels,
-        "EA (%)": [f"{v:.2f}%" for v in ea_pct],
-        "EI (%)": [f"{v:.2f}%" for v in ei_pct],
-        "Kp (%)": [f"{v:.2f}%" for v in kp_pct]
-    })
-    st.dataframe(contrib_df, use_container_width=True)
 
     st.subheader("Layer Parameters at This Position")
     param_rows = []
     for l in layers:
         row = {
-            "Layer": l['name'],
-            "Type": l['type'],
-            "r_in (mm)": l['r_in'],
-            "r_out (mm)": l['r_out'],
-            "E_z (MPa)": f"{l['E_z']:.2f}",
-            "E_theta (MPa)": f"{l['E_theta']:.2f}",
+            "Layer": l['name'], "Type": l['type'],
+            "r_in (mm)": l['r_in'], "r_out (mm)": l['r_out'],
+            "E_z (MPa)": f"{l['E_z']:.2f}", "E_theta (MPa)": f"{l['E_theta']:.2f}",
+            "Yield Strength (MPa)": f"{l.get('sigma_y', 0):.1f}"
         }
         row["V_f (%)"] = f"{l['V_f']*100:.2f}%" if l['V_f'] is not None else "—"
         row["V_void (%)"] = f"{l['V_void']*100:.2f}%" if l['V_void'] is not None else "—"
-        row["Braid Angle (°)"] = f"{l['alpha']:.2f}" if l['alpha'] is not None else "—"
         param_rows.append(row)
-    param_df = pd.DataFrame(param_rows)
-    st.dataframe(param_df, use_container_width=True)
+    st.dataframe(pd.DataFrame(param_rows), use_container_width=True)
