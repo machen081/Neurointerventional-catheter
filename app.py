@@ -93,7 +93,7 @@ def normalize_structure(structure):
     return structure
 
 # ==================== 会话状态 ====================
-CURRENT_VERSION = "v8_return_sync"
+CURRENT_VERSION = "v9_shared_yield"
 
 if 'structure_version' not in st.session_state or st.session_state.structure_version != CURRENT_VERSION:
     st.session_state.structure = create_default_structure()
@@ -357,57 +357,109 @@ def compute_stiffness(layers, ea_corr=1.0, kp_corr=1.0):
 
     return EA, EI, Kp, EA_c, EI_c, Kp_c, model_used, thick_ratio
 
-# ==================== 强度计算 ====================
-def compute_strength(layers):
+# ==================== 强度：轴向拉力 ====================
+def compute_axial_strength(layers):
     Fu_layer = []
-    Mu_layer = []
     for l in layers:
         r_in, r_out = l['r_in'], l['r_out']
         A_i = np.pi * (r_out**2 - r_in**2)
-        I_i = np.pi / 4 * (r_out**4 - r_in**4)
         sigma_uts = l.get('sigma_uts', 0.0)
-
         if l.get('Fu_override') is not None:
             Fu_layer.append(l['Fu_override'])
         else:
             V_f = l.get('V_f')
             if V_f is None: V_f = 1.0
             Fu_layer.append(sigma_uts * A_i * V_f)
+    return sum(Fu_layer), Fu_layer
 
-        if r_out > 0:
-            Mu_layer.append(sigma_uts * I_i / r_out)
-        else:
-            Mu_layer.append(0.0)
-
-    return sum(Fu_layer), sum(Mu_layer), Fu_layer, Mu_layer
-
-def compute_collapse_force(layers):
+# ==================== 强度：弯曲屈服（共同变形） ====================
+def compute_bending_yield(layers):
+    """
+    各层共同弯曲，曲率相同。谁最先达到抗拉强度，谁控制。
+    曲率 κ = M / EI_total
+    层 i 外表面应力 σ_i = E_z,i · κ · r_o,i
+    令 σ_i = σ_uts,i：
+        M_{y,i} = σ_uts,i · EI_total / (E_z,i · r_o,i)
+    返回 (My, 控制层名, 所有候选)
+    """
     if not layers:
-        return 0.0, None
-    sorted_layers = sorted(layers, key=lambda l: -l['r_out'])
-    outer = sorted_layers[0]
-    r_in = outer['r_in']; r_out = outer['r_out']
-    t = r_out - r_in
-    R = (r_in + r_out) / 2
-    sigma_uts = outer.get('sigma_uts', 0.0)
-    if t <= 0 or R <= 0:
-        return 0.0, outer
-    Fc = sigma_uts * t**2 / (1.91 * R)
-    return Fc, outer
+        return 0.0, None, []
+    EI_total = sum(
+        l['E_z'] * (np.pi/4) * (l['r_out']**4 - l['r_in']**4)
+        for l in layers
+    )
+    if EI_total <= 0:
+        return 0.0, None, []
+
+    candidates = []
+    for l in layers:
+        E_i = l['E_z']
+        r_out = l['r_out']
+        sigma_uts = l.get('sigma_uts', 0.0)
+        if E_i > 0 and r_out > 0 and sigma_uts > 0:
+            M_i = sigma_uts * EI_total / (E_i * r_out)
+            candidates.append({'layer': l['name'], 'M_y': M_i, 'E_z': E_i,
+                               'r_out': r_out, 'sigma_uts': sigma_uts})
+
+    if not candidates:
+        return 0.0, None, []
+    candidates.sort(key=lambda c: c['M_y'])
+    return candidates[0]['M_y'], candidates[0]['layer'], candidates
+
+# ==================== 强度：压扁屈服（共同变形） ====================
+def compute_collapse_force(layers):
+    """
+    各层共同承担压扁弯矩，曲率相同。
+    M_max = C · F · R （单位轴向深度，C ≈ 0.318）
+    κ = M_max / EI_theta_total
+    层 i 表面应力 σ_i = E_theta,i · κ · (t_i/2)
+    令 σ_i = σ_uts,i：
+        F_{c,i} = σ_uts,i · EI_theta_total · 2 / (E_theta,i · C · R · t_i)
+    返回 (Fc, 控制层名, 所有候选)
+    """
+    if not layers:
+        return 0.0, None, []
+    EI_theta_total = sum(
+        compute_wall_bending_stiffness(l['E_theta'], l['r_in'], l['r_out'])
+        for l in layers
+    )
+    if EI_theta_total <= 0:
+        return 0.0, None, []
+
+    r0 = min(l['r_in'] for l in layers)
+    rn = max(l['r_out'] for l in layers)
+    R = (r0 + rn) / 2
+    C = 0.318
+
+    candidates = []
+    for l in layers:
+        E_theta = l['E_theta']
+        t_i = l['r_out'] - l['r_in']
+        sigma_uts = l.get('sigma_uts', 0.0)
+        if E_theta > 0 and t_i > 0 and R > 0 and sigma_uts > 0:
+            F_i = sigma_uts * EI_theta_total * 2 / (E_theta * C * R * t_i)
+            candidates.append({'layer': l['name'], 'F_c': F_i, 'E_theta': E_theta,
+                               't': t_i, 'sigma_uts': sigma_uts})
+
+    if not candidates:
+        return 0.0, None, []
+    candidates.sort(key=lambda c: c['F_c'])
+    return candidates[0]['F_c'], candidates[0]['layer'], candidates
 
 # ==================== 沿长度扫描 ====================
 def compute_along_length(structure, L_total, ea_corr=1.0, kp_corr=1.0, n=200):
     xs = np.linspace(0, L_total, n)
     EA_arr = np.zeros(n); EI_arr = np.zeros(n); Kp_arr = np.zeros(n)
-    Fu_arr = np.zeros(n); Mu_arr = np.zeros(n); Fc_arr = np.zeros(n)
+    Fu_arr = np.zeros(n); My_arr = np.zeros(n); Fc_arr = np.zeros(n)
     for i, x in enumerate(xs):
         layers = compute_at_x(structure, x)
         EA, EI, Kp, _, _, _, _, _ = compute_stiffness(layers, ea_corr, kp_corr)
-        Fu, Mu, _, _ = compute_strength(layers)
-        Fc, _ = compute_collapse_force(layers)
+        Fu, _ = compute_axial_strength(layers)
+        My, _, _ = compute_bending_yield(layers)
+        Fc, _, _ = compute_collapse_force(layers)
         EA_arr[i] = EA; EI_arr[i] = EI; Kp_arr[i] = Kp
-        Fu_arr[i] = Fu; Mu_arr[i] = Mu; Fc_arr[i] = Fc
-    return xs, EA_arr, EI_arr, Kp_arr, Fu_arr, Mu_arr, Fc_arr
+        Fu_arr[i] = Fu; My_arr[i] = My; Fc_arr[i] = Fc
+    return xs, EA_arr, EI_arr, Kp_arr, Fu_arr, My_arr, Fc_arr
 
 # ==================== 侧边栏 ====================
 with st.sidebar:
@@ -462,12 +514,11 @@ with st.sidebar:
 
             st.caption(LAYER_TYPES[layer['type']]['caption'])
 
-            # 用返回值直接同步，不用 on_change
             edited = st.data_editor(
                 layer['data'],
                 num_rows="dynamic",
                 use_container_width=True,
-                key=f"data_{i}_v2"
+                key=f"data_{i}_v3"
             )
             if edited is not None and not edited.empty:
                 layer['data'] = edited.copy()
@@ -489,7 +540,6 @@ with st.sidebar:
         st.rerun()
 
     if st.button("恢复示例数据"):
-        # 清除所有编辑器的缓存 key
         for k in list(st.session_state.keys()):
             if k.startswith("data_") or k.startswith("name_") or k.startswith("type_"):
                 del st.session_state[k]
@@ -511,7 +561,7 @@ x_pos = st.slider("Axial position x (mm)", min_value=0.0, max_value=L_total,
                   value=st.session_state.x_pos, step=0.5)
 st.session_state.x_pos = x_pos
 
-xs, EA_arr, EI_arr, Kp_arr, Fu_arr, Mu_arr, Fc_arr = compute_along_length(
+xs, EA_arr, EI_arr, Kp_arr, Fu_arr, My_arr, Fc_arr = compute_along_length(
     structure, L_total, ea_correction, kp_correction)
 
 layers = compute_at_x(structure, x_pos)
@@ -622,17 +672,25 @@ else:
 # ============================================================
 st.markdown("---")
 st.markdown("## 二、Strength Analysis（强度分析）")
-st.caption("强度描述导管能承受的极限载荷，包括轴向拉伸、弯曲屈服、压扁屈服三种模式。")
+st.caption("强度描述导管能承受的极限载荷。弯曲和压扁采用「各层共同变形、最弱层先屈服」模型。")
 
 if layers:
-    Fu, Mu, Fu_layer, Mu_layer = compute_strength(layers)
-    Fc, outer_layer = compute_collapse_force(layers)
+    Fu, Fu_layer = compute_axial_strength(layers)
+    My, bending_ctrl, bending_cands = compute_bending_yield(layers)
+    Fc, collapse_ctrl, collapse_cands = compute_collapse_force(layers)
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Max Axial Tensile Force Fu", f"{Fu:.2f} N")
-    c2.metric("Max Bending Moment Mu", f"{Mu:.2f} N·mm")
+    c2.metric("Bending Yield Moment My", f"{My:.4f} N·mm")
     c3.metric("Collapse Force Fc", f"{Fc:.2f} N")
 
+    # 控制层说明
+    st.info(
+        f"**弯曲屈服控制层**：{bending_ctrl}（该层外表面最先达到抗拉强度）。"
+        f" **压扁屈服控制层**：{collapse_ctrl}（该层表面最先达到抗拉强度）。"
+    )
+
+    # 强度曲线
     st.subheader("Strength along Length")
     fig_t, axes_t = plt.subplots(3, 1, figsize=(10, 12))
     fig_t.suptitle("Strength Distribution along Catheter Length", y=0.98, fontsize=13)
@@ -642,49 +700,59 @@ if layers:
     axes_t[0].set_title('Max Axial Tensile Force')
     axes_t[0].grid(True); axes_t[0].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
 
-    axes_t[1].plot(xs, Mu_arr, 'c-', linewidth=2)
-    axes_t[1].set_ylabel('Bending Moment Mu (N·mm)')
-    axes_t[1].set_title('Max Bending Moment (outer fiber yield)')
+    axes_t[1].plot(xs, My_arr, 'c-', linewidth=2)
+    axes_t[1].set_ylabel('Bending Moment My (N·mm)')
+    axes_t[1].set_title('Bending Yield Moment (weakest layer controls)')
     axes_t[1].grid(True); axes_t[1].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
 
     axes_t[2].plot(xs, Fc_arr, 'y-', linewidth=2)
     axes_t[2].set_ylabel('Collapse Force Fc (N)')
     axes_t[2].set_xlabel('Axial position (mm)')
-    axes_t[2].set_title('Collapse Force (outer layer yield)')
+    axes_t[2].set_title('Collapse Force (weakest layer controls)')
     axes_t[2].grid(True); axes_t[2].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
 
     fig_t.tight_layout(rect=[0, 0, 1, 0.96])
     st.pyplot(fig_t)
 
-    st.subheader("Strength Contribution per Layer")
-    strength_rows = []
-    for i, l in enumerate(layers):
-        A_i = np.pi * (l['r_out']**2 - l['r_in']**2)
-        I_i = np.pi / 4 * (l['r_out']**4 - l['r_in']**4)
-        V_f = l.get('V_f')
-        V_f_disp = f"{V_f*100:.2f}%" if V_f is not None else "100%"
-        method = "Spring formula" if l.get('Fu_override') is not None else "σ·A·Vf"
-        strength_rows.append({
-            "Layer": l['name'],
-            "Type": l['type'],
-            "Method": method,
-            "UTS (MPa)": f"{l['sigma_uts']:.1f}",
-            "A_i (mm²)": f"{A_i:.4f}",
-            "I_i (mm⁴)": f"{I_i:.6f}",
-            "V_f": V_f_disp,
-            "Fu (N)": f"{Fu_layer[i]:.4f}",
-            "Mu (N·mm)": f"{Mu_layer[i]:.4f}"
+    # 弯曲屈服候选层明细
+    st.subheader("Bending Yield — Candidate Layers")
+    st.caption("每一层单独达到抗拉强度时，所需的整体弯矩。取最小值作为整体屈服力矩。")
+    b_rows = []
+    for c in bending_cands:
+        b_rows.append({
+            "Layer": c['layer'],
+            "E_z (MPa)": f"{c['E_z']:.1f}",
+            "r_out (mm)": f"{c['r_out']:.4f}",
+            "σ_uts (MPa)": f"{c['sigma_uts']:.1f}",
+            "M_y (N·mm)": f"{c['M_y']:.4f}"
         })
-    st.dataframe(pd.DataFrame(strength_rows), use_container_width=True)
+    st.dataframe(pd.DataFrame(b_rows), use_container_width=True)
 
-    if outer_layer is not None:
-        st.info(
-            f"压扁屈服由最外层（**{outer_layer['name']}**）控制。"
-            f"该层抗拉强度 {outer_layer['sigma_uts']:.1f} MPa，"
-            f"管壁厚度 t = {outer_layer['r_out'] - outer_layer['r_in']:.4f} mm，"
-            f"中面半径 R = {(outer_layer['r_in'] + outer_layer['r_out'])/2:.4f} mm。"
-            f"公式：F_c = σ · t² / (1.91 · R)。"
-        )
+    # 压扁屈服候选层明细
+    st.subheader("Collapse — Candidate Layers")
+    st.caption("每一层单独达到抗拉强度时，所需的整体压扁力。取最小值作为整体压扁屈服力。")
+    c_rows = []
+    for c in collapse_cands:
+        c_rows.append({
+            "Layer": c['layer'],
+            "E_theta (MPa)": f"{c['E_theta']:.1f}",
+            "t (mm)": f"{c['t']:.4f}",
+            "σ_uts (MPa)": f"{c['sigma_uts']:.1f}",
+            "F_c (N)": f"{c['F_c']:.4f}"
+        })
+    st.dataframe(pd.DataFrame(c_rows), use_container_width=True)
+
+    # 轴向拉力贡献
+    st.subheader("Axial Tensile — Layer Contributions")
+    fu_rows = []
+    for i, l in enumerate(layers):
+        method = "Spring formula" if l.get('Fu_override') is not None else "σ·A·Vf"
+        fu_rows.append({
+            "Layer": l['name'], "Type": l['type'], "Method": method,
+            "UTS (MPa)": f"{l['sigma_uts']:.1f}",
+            "Fu (N)": f"{Fu_layer[i]:.4f}"
+        })
+    st.dataframe(pd.DataFrame(fu_rows), use_container_width=True)
 
 # ============================================================
 # 参数明细表
