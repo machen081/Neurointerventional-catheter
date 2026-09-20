@@ -13,7 +13,7 @@ LAYER_TYPES = {
                     '弹性模量(MPa)', '抗拉强度(MPa)'],
         'default': {'起始位置(mm)': 0.0, '结束位置(mm)': 30.0,
                     '内半径(mm)': 0.27, '外半径(mm)': 0.3048,
-                    '弹性模量(MPa)': 100.0, '抗拉强度(MPa)': 106.2},
+                    '弹性模量(MPa)': 400.0, '抗拉强度(MPa)': 106.2},
         'caption': '普通材料：各向同性，E_z = E_θ'
     },
     '编织层': {
@@ -62,7 +62,7 @@ def create_default_structure(L_total=30):
         {'name': 'Coil', 'type': '普通材料',
          'data': pd.DataFrame([{'起始位置(mm)': 0.0, '结束位置(mm)': 30.0,
                                 '内半径(mm)': 0.27, '外半径(mm)': 0.3048,
-                                '弹性模量(MPa)': 100.0, '抗拉强度(MPa)': 106.2}])},
+                                '弹性模量(MPa)': 400.0, '抗拉强度(MPa)': 106.2}])},
     ]
 
 def normalize_structure(structure):
@@ -93,7 +93,7 @@ def normalize_structure(structure):
     return structure
 
 # ==================== 会话状态 ====================
-CURRENT_VERSION = "v10_3pt_bending"
+CURRENT_VERSION = "v11_coil_400"
 
 if 'structure_version' not in st.session_state or st.session_state.structure_version != CURRENT_VERSION:
     st.session_state.structure = create_default_structure()
@@ -503,7 +503,7 @@ with st.sidebar:
                 layer['data'],
                 num_rows="dynamic",
                 use_container_width=True,
-                key=f"data_{i}_v4"
+                key=f"data_{i}_v5"
             )
             if edited is not None and not edited.empty:
                 layer['data'] = edited.copy()
