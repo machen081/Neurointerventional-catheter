@@ -23,7 +23,7 @@ LAYER_TYPES = {
                     '扁丝宽度(mm)': 0.05, '扁丝厚度(mm)': 0.02,
                     '股数': 16, '每束根数': 1, '每英寸交叉数': 80,
                     '丝材模量(MPa)': 200000.0, '原始基体体积分数': 0.0},
-        'caption': '编织层：编织角自动计算；E_z 用于轴向/弯曲，E_θ 用于抗压扁'
+        'caption': '编织层：无编织层的段自动用热熔材料填充'
     },
     '弹簧圈': {
         'columns': ['起始位置(mm)', '结束位置(mm)', '内半径(mm)', '外半径(mm)',
@@ -32,7 +32,7 @@ LAYER_TYPES = {
                     '内半径(mm)': 0.42, '外半径(mm)': 0.45,
                     '丝径(mm)': 0.02, '螺距(mm)': 0.10,
                     '丝材模量(MPa)': 200000.0, '原始基体体积分数': 0.0},
-        'caption': '弹簧圈：E_z 用弹簧模型，E_θ 用丝材体积分数'
+        'caption': '弹簧圈：无弹簧圈的段自动用热熔材料填充'
     },
 }
 
@@ -50,13 +50,13 @@ def create_default_structure(L_total=350):
                                 '内半径(mm)': 0.55, '外半径(mm)': 0.60,
                                 '弹性模量(MPa)': 50.0}])},
         {'name': 'Braid', 'type': '编织层',
-         'data': pd.DataFrame([{'起始位置(mm)': 0.0, '结束位置(mm)': L_total,
+         'data': pd.DataFrame([{'起始位置(mm)': 20.0, '结束位置(mm)': 300.0,
                                 '内半径(mm)': 0.45, '外半径(mm)': 0.55,
                                 '扁丝宽度(mm)': 0.05, '扁丝厚度(mm)': 0.02,
                                 '股数': 16, '每束根数': 1, '每英寸交叉数': 80,
                                 '丝材模量(MPa)': 200000.0, '原始基体体积分数': 0.0}])},
         {'name': 'Coil', 'type': '弹簧圈',
-         'data': pd.DataFrame([{'起始位置(mm)': 0.0, '结束位置(mm)': L_total,
+         'data': pd.DataFrame([{'起始位置(mm)': 50.0, '结束位置(mm)': 150.0,
                                 '内半径(mm)': 0.42, '外半径(mm)': 0.45,
                                 '丝径(mm)': 0.02, '螺距(mm)': 0.10,
                                 '丝材模量(MPa)': 200000.0, '原始基体体积分数': 0.0}])},
@@ -123,22 +123,24 @@ def validate_structure(structure, L_total):
         for i, layer in enumerate(structure):
             row = find_segment(layer['data'], x)
             if row is not None:
-                active.append((i, layer['name'], row['内半径(mm)'], row['外半径(mm)']))
+                active.append((i, layer['name'], layer['type'],
+                               row['内半径(mm)'], row['外半径(mm)']))
 
         if not active:
             continue
 
-        active_sorted = sorted(active, key=lambda a: a[2])
+        active_sorted = sorted(active, key=lambda a: a[3])
         for k in range(len(active_sorted) - 1):
-            i1, name1, ri1, ro1 = active_sorted[k]
-            i2, name2, ri2, ro2 = active_sorted[k + 1]
+            i1, name1, type1, ri1, ro1 = active_sorted[k]
+            i2, name2, type2, ri2, ro2 = active_sorted[k + 1]
 
             gap = ri2 - ro1
             if gap > 0.005:
-                warnings.append(
-                    f"x = {x:.1f} mm 处：第 {i1+1} 层（{name1}）外半径 {ro1:.3f} 与 "
-                    f"第 {i2+1} 层（{name2}）内半径 {ri2:.3f} 之间存在间隙 {gap:.3f} mm"
-                )
+                # 判断缺失的是哪种层，可能是编织层或弹簧圈
+                msg = (f"x = {x:.1f} mm 处：第 {i1+1} 层（{name1}）外半径 {ro1:.3f} 与 "
+                       f"第 {i2+1} 层（{name2}）内半径 {ri2:.3f} 之间存在间隙 {gap:.3f} mm"
+                       f"（若该段缺编织层或弹簧圈，计算时将由热熔材料自动填充）")
+                warnings.append(msg)
             elif gap < -0.005:
                 warnings.append(
                     f"x = {x:.1f} mm 处：第 {i1+1} 层（{name1}）外半径 {ro1:.3f} 与 "
@@ -178,6 +180,32 @@ def find_hot_melt_E(structure, x):
         return None
     candidates.sort(key=lambda c: -c[0])
     return candidates[0][1]
+
+# ==================== 参考半径提取（通用函数） ====================
+def get_reference_radius(structure, layer_type_name):
+    """
+    从指定类型的所有分段中提取参考半径范围（中位数）。
+    返回 (r_in_ref, r_out_ref) 或 None。
+    """
+    refs = []
+    for layer in structure:
+        if layer['type'] != layer_type_name:
+            continue
+        df = layer['data']
+        if df is None or df.empty:
+            continue
+        for _, row in df.iterrows():
+            try:
+                r_in = row['内半径(mm)']
+                r_out = row['外半径(mm)']
+                refs.append((r_in, r_out))
+            except Exception:
+                continue
+    if not refs:
+        return None
+    r_in_med = float(np.median([r[0] for r in refs]))
+    r_out_med = float(np.median([r[1] for r in refs]))
+    return (r_in_med, r_out_med)
 
 # ==================== 编织角自动计算 ====================
 def compute_braid_angle(r_in, r_out, PPI, N_strands):
@@ -248,15 +276,22 @@ def compute_coil_moduli(row, E_hm):
     E_theta = E_f * V_spring + E_m_eff * (1 - V_spring)
     return E_z, E_theta, V_spring, V_void
 
-# ==================== 截面生成 ====================
+# ==================== 截面生成（含编织层/弹簧圈缺失段自动填充） ====================
 def compute_at_x(structure, x):
     hot_melt_E = find_hot_melt_E(structure, x)
     layers = []
+    has_braid_here = False
+    has_coil_here = False
+
     for idx, layer in enumerate(structure):
         row = find_segment(layer['data'], x)
         if row is None:
             continue
         ltype = layer['type']
+        if ltype == '编织层':
+            has_braid_here = True
+        elif ltype == '弹簧圈':
+            has_coil_here = True
         try:
             alpha = None
             V_void = None
@@ -282,8 +317,58 @@ def compute_at_x(structure, x):
             'V_f': V_f,
             'V_void': V_void,
             'alpha': alpha,
-            'layer_idx': idx
+            'layer_idx': idx,
+            'is_filler': False
         })
+
+    # 辅助函数：检查给定半径范围是否与现有层实质性重叠（重叠宽度 > 5 µm）
+    def is_occupied(r_in_ref, r_out_ref, tol=0.005):
+        for l in layers:
+            overlap = min(r_out_ref, l['r_out']) - max(r_in_ref, l['r_in'])
+            if overlap > tol:
+                return True
+        return False
+
+    # 编织层缺失 → 热熔填充
+    if not has_braid_here:
+        braid_ref = get_reference_radius(structure, '编织层')
+        if braid_ref is not None and hot_melt_E is not None:
+            r_in_ref, r_out_ref = braid_ref
+            if not is_occupied(r_in_ref, r_out_ref):
+                layers.append({
+                    'name': 'Hot Melt (braid filler)',
+                    'type': '普通材料',
+                    'r_in': r_in_ref,
+                    'r_out': r_out_ref,
+                    'E_z': hot_melt_E,
+                    'E_theta': hot_melt_E,
+                    'V_f': None,
+                    'V_void': None,
+                    'alpha': None,
+                    'layer_idx': -2,
+                    'is_filler': True
+                })
+
+    # 弹簧圈缺失 → 热熔填充
+    if not has_coil_here:
+        coil_ref = get_reference_radius(structure, '弹簧圈')
+        if coil_ref is not None and hot_melt_E is not None:
+            r_in_ref, r_out_ref = coil_ref
+            if not is_occupied(r_in_ref, r_out_ref):
+                layers.append({
+                    'name': 'Hot Melt (coil filler)',
+                    'type': '普通材料',
+                    'r_in': r_in_ref,
+                    'r_out': r_out_ref,
+                    'E_z': hot_melt_E,
+                    'E_theta': hot_melt_E,
+                    'V_f': None,
+                    'V_void': None,
+                    'alpha': None,
+                    'layer_idx': -1,
+                    'is_filler': True
+                })
+
     layers.sort(key=lambda l: -l['r_out'])
     return layers
 
@@ -473,71 +558,6 @@ with st.sidebar:
 # ==================== 半径校验结果 ====================
 st.header("Catheter Multi-layer Stiffness Analysis")
 
-# 使用流程说明（可折叠）
-with st.expander("📖 使用流程说明（点击展开）", expanded=False):
-    st.markdown("""
-### 一、定义导管结构
-
-1. 在左侧设置导管总长度。
-2. 点击「➕ 添加新层」添加层，或直接编辑现有层。
-3. **层顺序**：列表中第一个为最外层，最后一个为最内层。默认顺序为 Hot Melt → Braid → Coil → PTFE。
-4. 每层可选择三种类型之一：
-   - **普通材料**：填写内半径、外半径、弹性模量。
-   - **编织层**：填写内外半径、扁丝宽度/厚度、股数、每束根数、PPI、丝材模量、原始基体体积分数。编织角自动计算。
-   - **弹簧圈**：填写内外半径、丝径、螺距、丝材模量、原始基体体积分数。
-5. 每层的表格可添加多行，实现**沿轴向分段**。每行代表一段，指定起始位置、结束位置及该段参数。
-
-### 二、热熔渗入
-
-- 编织层和弹簧圈的**渗入热熔模量**自动取自当前位置最外层普通材料层（通常是 Hot Melt）。
-- 无需手动输入，界面会显示当前位置读取到的热熔模量。
-- 若未找到热熔层，渗入基体模量按 0 计算，并给出警告。
-
-### 三、检查校验结果
-
-- **错误（红色）**：阻止计算，必须修正。包括起始位置为负、内外半径倒置、外半径不大于内半径等。
-- **警告（黄色）**：不阻止计算，但需留意。包括分段超出总长、相邻层间隙或重叠超过 5 µm 等。
-
-### 四、查看沿长度刚度分布
-
-- 主区域上方显示三条曲线：轴向刚度 EA、弯曲刚度 EI、抗压扁刚度 Kp。
-- 滑动滑块选择轴向位置 x，曲线上的灰色虚线会同步标记该位置。
-- 当前位置的所有结果（指标、截面图、贡献百分比）都基于该位置存在的层计算。
-
-### 五、查看当前截面分析
-
-- **三个指标**：当前位置的 EA、EI、Kp 数值。
-- **壁厚比提示**：根据壁厚/半径比自动分档，并说明使用的模型和精度。
-  - 薄壁（< 0.1）：Timoshenko 薄环理论，偏差 < 5%。
-  - 厚壁（0.1 ~ 0.5）：曲梁修正 + 环向拉伸，预计偏差 10~40%。
-  - 极厚壁（≥ 0.5）：近似估计，偏差 40~60%，建议有限元或实验标定。
-- **截面图**：编织层用斜线填充，弹簧圈用叉线填充，普通材料纯色。
-- **贡献百分比条形图**：各层对 EA、EI、Kp 的相对贡献。
-- **层参数表**：包含 E_z、E_θ、V_f、V_void、编织角等。
-
-### 六、Kp 修正系数（关键）
-
-**目的**：将解析模型的理论值校准到实际值。
-
-**使用流程**：
-
-1. **薄壁导管（λ < 0.1）**：修正系数保持 1.000，直接使用理论值（精度高）。
-2. **厚壁或极厚壁导管（λ ≥ 0.1）**：
-   - 第一步：先用理论值（修正系数 = 1.000）估算。
-   - 第二步：做一次实验（平板压缩测 F-ΔD）或有限元仿真，得到实测 Kp。
-   - 第三步：计算修正系数 = 实测 Kp / 理论 Kp。
-   - 第四步：将修正系数填入左侧输入框（例如 1.35 或 0.75）。
-   - 第五步：后续同类导管可直接沿用该系数，无需重复标定。
-
-**注意**：修正系数是经验值，只适用于与标定工况相近的导管。若结构、材料、壁厚比变化较大，建议重新标定。
-
-### 七、保存与导出
-
-- 当前配置存在浏览器会话中，刷新页面会保留。
-- 若需持久化，可截图或手动记录参数。
-- 若需对比多个版本，可分别保存截图，或自行导出 CSV。
-    """)
-
 structure = st.session_state.structure
 L_total = st.session_state.L_total
 kp_correction = st.session_state.kp_correction
@@ -601,6 +621,11 @@ else:
     c2.metric("Total Bending Stiffness EI", f"{EI:.2f} N·mm²")
     c3.metric("Total Crush Stiffness Kp", f"{Kp:.2f} N/mm")
 
+    # 提示：当前位置是否有热熔填充
+    filler_names = [l['name'] for l in layers if l.get('is_filler', False)]
+    if filler_names:
+        st.info(f"当前段缺失的层已自动用热熔材料填充：{', '.join(filler_names)}。")
+
     # 三档壁厚提示
     if thick_ratio < 0.1:
         st.info(
@@ -612,8 +637,9 @@ else:
         st.warning(
             f"壁厚/半径比 = **{thick_ratio:.3f}** ∈ [0.1, 0.5)（厚壁）。"
             f"抗压扁模型：**{model_used}**。"
-            f"已包含曲梁弯曲修正和环向拉伸，未包含剪切。"
-            f"预计偏差 10~40%，建议实验或有限元标定修正系数。"
+            f"已包含曲梁弯曲修正和环向拉伸。环向拉伸贡献较小（< 5%），"
+            f"主要偏差来自未包含的剪切变形和厚环常数修正，预计 10~40%。"
+            f"建议实验或有限元标定修正系数。"
             f"当前修正系数：**{kp_correction:.3f}**。"
         )
     else:
@@ -648,6 +674,10 @@ else:
             ax2.add_patch(mpatches.Wedge((0, 0), r_out, 0, 360,
                                          width=r_out - r_in,
                                          fill=False, hatch='xxx', edgecolor='none'))
+        elif l.get('is_filler', False):
+            ax2.add_patch(mpatches.Wedge((0, 0), r_out, 0, 360,
+                                         width=r_out - r_in,
+                                         fill=False, hatch='...', edgecolor='none'))
 
     inner_r = min(l['r_in'] for l in layers)
     if inner_r > 0:
