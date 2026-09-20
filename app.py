@@ -93,7 +93,7 @@ def normalize_structure(structure):
     return structure
 
 # ==================== 会话状态 ====================
-CURRENT_VERSION = "v9_shared_yield"
+CURRENT_VERSION = "v10_3pt_bending"
 
 if 'structure_version' not in st.session_state or st.session_state.structure_version != CURRENT_VERSION:
     st.session_state.structure = create_default_structure()
@@ -102,6 +102,7 @@ if 'structure_version' not in st.session_state or st.session_state.structure_ver
     st.session_state.x_pos = 0.0
     st.session_state.ea_correction = 1.0
     st.session_state.kp_correction = 1.0
+    st.session_state.span_L = 30.0
 else:
     st.session_state.structure = normalize_structure(st.session_state.structure)
 
@@ -109,6 +110,7 @@ if 'L_total' not in st.session_state: st.session_state.L_total = 30.0
 if 'x_pos' not in st.session_state: st.session_state.x_pos = 0.0
 if 'ea_correction' not in st.session_state: st.session_state.ea_correction = 1.0
 if 'kp_correction' not in st.session_state: st.session_state.kp_correction = 1.0
+if 'span_L' not in st.session_state: st.session_state.span_L = 30.0
 
 # ==================== 分段查找 ====================
 def find_segment(df, x):
@@ -372,16 +374,8 @@ def compute_axial_strength(layers):
             Fu_layer.append(sigma_uts * A_i * V_f)
     return sum(Fu_layer), Fu_layer
 
-# ==================== 强度：弯曲屈服（共同变形） ====================
+# ==================== 强度：弯曲屈服 ====================
 def compute_bending_yield(layers):
-    """
-    各层共同弯曲，曲率相同。谁最先达到抗拉强度，谁控制。
-    曲率 κ = M / EI_total
-    层 i 外表面应力 σ_i = E_z,i · κ · r_o,i
-    令 σ_i = σ_uts,i：
-        M_{y,i} = σ_uts,i · EI_total / (E_z,i · r_o,i)
-    返回 (My, 控制层名, 所有候选)
-    """
     if not layers:
         return 0.0, None, []
     EI_total = sum(
@@ -406,17 +400,8 @@ def compute_bending_yield(layers):
     candidates.sort(key=lambda c: c['M_y'])
     return candidates[0]['M_y'], candidates[0]['layer'], candidates
 
-# ==================== 强度：压扁屈服（共同变形） ====================
+# ==================== 强度：压扁屈服 ====================
 def compute_collapse_force(layers):
-    """
-    各层共同承担压扁弯矩，曲率相同。
-    M_max = C · F · R （单位轴向深度，C ≈ 0.318）
-    κ = M_max / EI_theta_total
-    层 i 表面应力 σ_i = E_theta,i · κ · (t_i/2)
-    令 σ_i = σ_uts,i：
-        F_{c,i} = σ_uts,i · EI_theta_total · 2 / (E_theta,i · C · R · t_i)
-    返回 (Fc, 控制层名, 所有候选)
-    """
     if not layers:
         return 0.0, None, []
     EI_theta_total = sum(
@@ -518,7 +503,7 @@ with st.sidebar:
                 layer['data'],
                 num_rows="dynamic",
                 use_container_width=True,
-                key=f"data_{i}_v3"
+                key=f"data_{i}_v4"
             )
             if edited is not None and not edited.empty:
                 layer['data'] = edited.copy()
@@ -536,6 +521,13 @@ with st.sidebar:
     st.session_state.kp_correction = kp_correction
 
     st.markdown("---")
+    st.markdown("**三点弯曲试验参数**")
+    span_L = st.number_input("三点弯曲跨距 L (mm)", min_value=1.0, max_value=200.0,
+                             value=float(st.session_state.span_L),
+                             step=1.0, key="span_L_input")
+    st.session_state.span_L = span_L
+
+    st.markdown("---")
     if st.button("🔄 强制刷新计算", type="primary"):
         st.rerun()
 
@@ -547,6 +539,7 @@ with st.sidebar:
         st.session_state.x_pos = 0.0
         st.session_state.ea_correction = 1.0
         st.session_state.kp_correction = 1.0
+        st.session_state.span_L = 30.0
         st.rerun()
 
 # ==================== 主区域 ====================
@@ -556,6 +549,7 @@ structure = st.session_state.structure
 L_total = st.session_state.L_total
 ea_correction = st.session_state.ea_correction
 kp_correction = st.session_state.kp_correction
+L_span = st.session_state.span_L
 
 x_pos = st.slider("Axial position x (mm)", min_value=0.0, max_value=L_total,
                   value=st.session_state.x_pos, step=0.5)
@@ -672,25 +666,27 @@ else:
 # ============================================================
 st.markdown("---")
 st.markdown("## 二、Strength Analysis（强度分析）")
-st.caption("强度描述导管能承受的极限载荷。弯曲和压扁采用「各层共同变形、最弱层先屈服」模型。")
+st.caption(f"强度描述导管能承受的极限载荷。弯曲强度按三点弯曲换算，跨距 L = {L_span:.1f} mm。")
 
 if layers:
     Fu, Fu_layer = compute_axial_strength(layers)
     My, bending_ctrl, bending_cands = compute_bending_yield(layers)
     Fc, collapse_ctrl, collapse_cands = compute_collapse_force(layers)
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Max Axial Tensile Force Fu", f"{Fu:.2f} N")
-    c2.metric("Bending Yield Moment My", f"{My:.4f} N·mm")
-    c3.metric("Collapse Force Fc", f"{Fc:.2f} N")
+    Fy_bending = 4 * My / L_span if L_span > 0 else 0.0
 
-    # 控制层说明
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Axial Tensile Force Fu", f"{Fu:.2f} N")
+    c2.metric("Bending Yield Moment My", f"{My:.4f} N·mm")
+    c3.metric("Bending Yield Force (3-pt)", f"{Fy_bending:.4f} N",
+              help=f"三点弯曲跨距 L = {L_span:.1f} mm")
+    c4.metric("Collapse Force Fc", f"{Fc:.2f} N")
+
     st.info(
         f"**弯曲屈服控制层**：{bending_ctrl}（该层外表面最先达到抗拉强度）。"
         f" **压扁屈服控制层**：{collapse_ctrl}（该层表面最先达到抗拉强度）。"
     )
 
-    # 强度曲线
     st.subheader("Strength along Length")
     fig_t, axes_t = plt.subplots(3, 1, figsize=(10, 12))
     fig_t.suptitle("Strength Distribution along Catheter Length", y=0.98, fontsize=13)
@@ -700,10 +696,20 @@ if layers:
     axes_t[0].set_title('Max Axial Tensile Force')
     axes_t[0].grid(True); axes_t[0].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
 
-    axes_t[1].plot(xs, My_arr, 'c-', linewidth=2)
-    axes_t[1].set_ylabel('Bending Moment My (N·mm)')
-    axes_t[1].set_title('Bending Yield Moment (weakest layer controls)')
-    axes_t[1].grid(True); axes_t[1].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
+    # 第二张图：My 和三点弯曲力双轴
+    ax_my = axes_t[1]
+    ax_my.plot(xs, My_arr, 'c-', linewidth=2, label='My')
+    ax_my.set_ylabel('Bending Moment My (N·mm)', color='c')
+    ax_my.tick_params(axis='y', labelcolor='c')
+    ax_my.set_title('Bending Yield Moment & Force')
+    ax_my.grid(True); ax_my.axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
+
+    ax_my2 = ax_my.twinx()
+    Fy_arr = 4 * My_arr / L_span if L_span > 0 else np.zeros_like(My_arr)
+    ax_my2.plot(xs, Fy_arr, color='orange', linewidth=2, linestyle='--',
+                label=f'Fy (3-pt, L={L_span:.0f} mm)')
+    ax_my2.set_ylabel(f'Bending Yield Force (N)', color='orange')
+    ax_my2.tick_params(axis='y', labelcolor='orange')
 
     axes_t[2].plot(xs, Fc_arr, 'y-', linewidth=2)
     axes_t[2].set_ylabel('Collapse Force Fc (N)')
@@ -714,23 +720,26 @@ if layers:
     fig_t.tight_layout(rect=[0, 0, 1, 0.96])
     st.pyplot(fig_t)
 
-    # 弯曲屈服候选层明细
+    # 弯曲屈服候选层
     st.subheader("Bending Yield — Candidate Layers")
-    st.caption("每一层单独达到抗拉强度时，所需的整体弯矩。取最小值作为整体屈服力矩。")
+    st.caption(f"每层单独达到抗拉强度时所需的整体弯矩与三点弯曲力（L = {L_span:.1f} mm）。取最小值作为控制层。")
     b_rows = []
     for c in bending_cands:
+        M_i = c['M_y']
+        F_i = 4 * M_i / L_span if L_span > 0 else 0.0
         b_rows.append({
             "Layer": c['layer'],
             "E_z (MPa)": f"{c['E_z']:.1f}",
             "r_out (mm)": f"{c['r_out']:.4f}",
             "σ_uts (MPa)": f"{c['sigma_uts']:.1f}",
-            "M_y (N·mm)": f"{c['M_y']:.4f}"
+            "M_y (N·mm)": f"{M_i:.4f}",
+            f"Fy (N, L={L_span:.0f}mm)": f"{F_i:.4f}"
         })
     st.dataframe(pd.DataFrame(b_rows), use_container_width=True)
 
-    # 压扁屈服候选层明细
+    # 压扁屈服候选层
     st.subheader("Collapse — Candidate Layers")
-    st.caption("每一层单独达到抗拉强度时，所需的整体压扁力。取最小值作为整体压扁屈服力。")
+    st.caption("每层单独达到抗拉强度时所需的整体压扁力。取最小值作为控制层。")
     c_rows = []
     for c in collapse_cands:
         c_rows.append({
