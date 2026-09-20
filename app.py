@@ -67,11 +67,30 @@ def create_default_structure(L_total=30):
     ]
 
 def normalize_structure(structure):
+    """健壮版：处理旧缓存中的非 DataFrame 数据，并补齐列"""
     for layer in structure:
-        expected_cols = LAYER_TYPES[layer['type']]['columns']
+        if not isinstance(layer, dict) or 'data' not in layer:
+            continue
         df = layer['data']
+        # 1. 强制转换为 DataFrame
+        if not isinstance(df, pd.DataFrame):
+            try:
+                if isinstance(df, list):
+                    df = pd.DataFrame(df)
+                elif isinstance(df, dict):
+                    df = pd.DataFrame([df])
+                else:
+                    df = pd.DataFrame()
+            except Exception:
+                df = pd.DataFrame()
+            layer['data'] = df
+        # 2. 空 DataFrame 用默认值填充
+        if df.empty:
+            layer['data'] = make_default_layer(layer.get('type', '普通材料'))
+            continue
+        # 3. 补齐列名
+        expected_cols = LAYER_TYPES[layer['type']]['columns']
         if list(df.columns) != expected_cols:
-            # 补齐缺失列
             for col in expected_cols:
                 if col not in df.columns:
                     if '屈服强度' in col:
@@ -81,9 +100,26 @@ def normalize_structure(structure):
             layer['data'] = df[expected_cols]
     return structure
 
+# ==================== 会话状态与版本重置 ====================
+CURRENT_VERSION = "v2"   # 改结构时递增
+
+if 'structure_version' not in st.session_state or st.session_state.structure_version != CURRENT_VERSION:
+    st.session_state.structure = create_default_structure()
+    st.session_state.structure_version = CURRENT_VERSION
+    st.session_state.L_total = 30.0
+    st.session_state.x_pos = 0.0
+    st.session_state.ea_correction = 0.5
+    st.session_state.kp_correction = 1.0
+else:
+    st.session_state.structure = normalize_structure(st.session_state.structure)
+
+if 'L_total' not in st.session_state: st.session_state.L_total = 30.0
+if 'x_pos' not in st.session_state: st.session_state.x_pos = 0.0
+if 'ea_correction' not in st.session_state: st.session_state.ea_correction = 0.5
+if 'kp_correction' not in st.session_state: st.session_state.kp_correction = 1.0
+
 # ==================== 回调函数 ====================
 def sync_editor_data(layer_idx, editor_key):
-    """当 data_editor 发生改变时，强制把最新数据写回 session_state"""
     if editor_key in st.session_state:
         if 0 <= layer_idx < len(st.session_state.structure):
             st.session_state.structure[layer_idx]['data'] = st.session_state[editor_key]
@@ -251,7 +287,6 @@ def compute_at_x(structure, x):
             if overlap > tol: return True
         return False
 
-    # 编织层缺失 → 热熔填充
     if not has_braid_here:
         braid_ref = get_reference_radius(structure, '编织层')
         if braid_ref is not None and hot_melt_E is not None:
@@ -265,7 +300,6 @@ def compute_at_x(structure, x):
                     'layer_idx': -2, 'is_filler': True
                 })
 
-    # 弹簧圈缺失 → 热熔填充
     if not has_coil_here:
         coil_ref = get_reference_radius(structure, '弹簧圈')
         if coil_ref is not None and hot_melt_E is not None:
@@ -355,16 +389,6 @@ def compute_along_length(structure, L_total, ea_corr=1.0, kp_corr=1.0, n=300):
         EA, EI, Kp, Fy, _, _, _, _, _ = compute_stiffness(layers, kp_corr)
         EA_arr[i] = EA; EI_arr[i] = EI; Kp_arr[i] = Kp; Fy_arr[i] = Fy
     return xs, EA_arr, EI_arr, Kp_arr, Fy_arr
-
-# ==================== 会话状态 ====================
-if 'structure' not in st.session_state:
-    st.session_state.structure = create_default_structure()
-else:
-    st.session_state.structure = normalize_structure(st.session_state.structure)
-if 'L_total' not in st.session_state: st.session_state.L_total = 30.0
-if 'x_pos' not in st.session_state: st.session_state.x_pos = 0.0
-if 'ea_correction' not in st.session_state: st.session_state.ea_correction = 0.5
-if 'kp_correction' not in st.session_state: st.session_state.kp_correction = 1.0
 
 # ==================== 侧边栏 ====================
 with st.sidebar:
