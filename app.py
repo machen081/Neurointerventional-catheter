@@ -125,7 +125,7 @@ def normalize_structure(structure):
     return structure
 
 # ==================== 会话状态 ====================
-CURRENT_VERSION = "v29_cn_tables_en_plots"
+CURRENT_VERSION = "v30_contrib_tables"
 
 if 'structure_version' not in st.session_state or st.session_state.structure_version != CURRENT_VERSION:
     st.session_state.structure = create_default_structure()
@@ -437,39 +437,85 @@ def compute_axial_strength(layers):
     return sum(Fu_layer), Fu_layer
 
 def compute_bending_yield(layers):
+    """
+    返回：
+      M_y (整体屈服弯矩)
+      ctrl_layer (控制层名称)
+      candidates (每层控制时的整体屈服弯矩)
+      contributions (在整体屈服时刻，每层实际承担的弯矩和占比)
+    """
     if not layers:
-        return 0.0, None, []
-    EI_total = sum(
-        l['E_z'] * (np.pi/4) * (l['r_out']**4 - l['r_in']**4)
-        for l in layers
-    )
+        return 0.0, None, [], []
+
+    EI_list = []
+    for l in layers:
+        I_i = (np.pi / 4) * (l['r_out']**4 - l['r_in']**4)
+        EI_i = l['E_z'] * I_i
+        EI_list.append(EI_i)
+    EI_total = sum(EI_list)
+
     if EI_total <= 0:
-        return 0.0, None, []
+        return 0.0, None, [], []
 
     candidates = []
-    for l in layers:
+    for i, l in enumerate(layers):
         E_i = l['E_z']
         r_out = l['r_out']
         sigma_uts = l.get('sigma_uts', 0.0)
         if E_i > 0 and r_out > 0 and sigma_uts > 0:
             M_i = sigma_uts * EI_total / (E_i * r_out)
-            candidates.append({'layer': l['name'], 'M_y': M_i, 'E_z': E_i,
-                               'r_out': r_out, 'sigma_uts': sigma_uts})
+            candidates.append({
+                'layer': l['name'], 'M_y': M_i, 'E_z': E_i,
+                'r_out': r_out, 'sigma_uts': sigma_uts,
+                'EI_i': EI_list[i]
+            })
 
     if not candidates:
-        return 0.0, None, []
+        return 0.0, None, [], []
+
     candidates.sort(key=lambda c: c['M_y'])
-    return candidates[0]['M_y'], candidates[0]['layer'], candidates
+    M_y = candidates[0]['M_y']
+    ctrl_layer = candidates[0]['layer']
+
+    # 在整体屈服时刻，每层实际承担的弯矩（按 EI 比例分配）
+    contributions = []
+    for i, l in enumerate(layers):
+        EI_i = EI_list[i]
+        if EI_total > 0:
+            M_actual = EI_i * M_y / EI_total
+            pct = EI_i / EI_total * 100
+        else:
+            M_actual = 0.0
+            pct = 0.0
+        contributions.append({
+            'layer': l['name'],
+            'EI_i': EI_i,
+            'M_actual': M_actual,
+            'pct': pct,
+            'is_ctrl': (l['name'] == ctrl_layer)
+        })
+
+    return M_y, ctrl_layer, candidates, contributions
 
 def compute_collapse_force(layers):
+    """
+    返回：
+      F_c (整体屈服力)
+      ctrl_layer (控制层名称)
+      candidates (每层控制时的整体屈服力)
+      contributions (在整体屈服时刻，每层实际承担的弯矩和占比)
+    """
     if not layers:
-        return 0.0, None, []
-    EI_theta_total = sum(
-        compute_wall_bending_stiffness(l['E_theta'], l['r_in'], l['r_out'])
-        for l in layers
-    )
+        return 0.0, None, [], []
+
+    EI_theta_list = []
+    for l in layers:
+        EI_theta_i = compute_wall_bending_stiffness(l['E_theta'], l['r_in'], l['r_out'])
+        EI_theta_list.append(EI_theta_i)
+    EI_theta_total = sum(EI_theta_list)
+
     if EI_theta_total <= 0:
-        return 0.0, None, []
+        return 0.0, None, [], []
 
     r0 = min(l['r_in'] for l in layers)
     rn = max(l['r_out'] for l in layers)
@@ -477,19 +523,46 @@ def compute_collapse_force(layers):
     C = 0.318
 
     candidates = []
-    for l in layers:
+    for i, l in enumerate(layers):
         E_theta = l['E_theta']
         t_i = l['r_out'] - l['r_in']
         sigma_uts = l.get('sigma_uts', 0.0)
         if E_theta > 0 and t_i > 0 and R > 0 and sigma_uts > 0:
             F_i = sigma_uts * EI_theta_total * 2 / (E_theta * C * R * t_i)
-            candidates.append({'layer': l['name'], 'F_c': F_i, 'E_theta': E_theta,
-                               't': t_i, 'sigma_uts': sigma_uts})
+            candidates.append({
+                'layer': l['name'], 'F_c': F_i, 'E_theta': E_theta,
+                't': t_i, 'sigma_uts': sigma_uts,
+                'EI_theta_i': EI_theta_list[i]
+            })
 
     if not candidates:
-        return 0.0, None, []
+        return 0.0, None, [], []
+
     candidates.sort(key=lambda c: c['F_c'])
-    return candidates[0]['F_c'], candidates[0]['layer'], candidates
+    F_c = candidates[0]['F_c']
+    ctrl_layer = candidates[0]['layer']
+
+    # 在整体屈服时刻，每层实际承担的弯矩（按 EI_theta 比例分配）
+    # 整体弯矩 M_max = C × F_c × R
+    M_max = C * F_c * R
+    contributions = []
+    for i, l in enumerate(layers):
+        EI_theta_i = EI_theta_list[i]
+        if EI_theta_total > 0:
+            M_actual = EI_theta_i * M_max / EI_theta_total
+            pct = EI_theta_i / EI_theta_total * 100
+        else:
+            M_actual = 0.0
+            pct = 0.0
+        contributions.append({
+            'layer': l['name'],
+            'EI_theta_i': EI_theta_i,
+            'M_actual': M_actual,
+            'pct': pct,
+            'is_ctrl': (l['name'] == ctrl_layer)
+        })
+
+    return F_c, ctrl_layer, candidates, contributions
 
 # ==================== 非线性力-位移模型 ====================
 def compute_crush_force_nonlinear(Kp, D_outer, dD, c=1.0):
@@ -507,8 +580,8 @@ def compute_along_length(structure, L_total, ea_corr=1.0, kp_corr=1.0, eta_bond=
         layers = compute_at_x(structure, x, eta_bond=eta_bond)
         EA, EI, Kp, _, _, _, _, _ = compute_stiffness(layers, ea_corr, kp_corr)
         Fu, _ = compute_axial_strength(layers)
-        My, _, _ = compute_bending_yield(layers)
-        Fc, _, _ = compute_collapse_force(layers)
+        My, _, _, _ = compute_bending_yield(layers)
+        Fc, _, _, _ = compute_collapse_force(layers)
         EA_arr[i] = EA; EI_arr[i] = EI; Kp_arr[i] = Kp
         Fu_arr[i] = Fu; My_arr[i] = My; Fc_arr[i] = Fc
     return xs, EA_arr, EI_arr, Kp_arr, Fu_arr, My_arr, Fc_arr
@@ -636,7 +709,7 @@ with st.sidebar:
                 layer['data'],
                 num_rows="dynamic",
                 use_container_width=True,
-                key=f"data_{i}_v29"
+                key=f"data_{i}_v30"
             )
             if edited is not None and not edited.empty:
                 layer['data'] = edited.copy()
@@ -801,7 +874,7 @@ with st.expander("2. 界面总览", expanded=False):
 | 使用说明书 | 分模块展开（本区块） |
 | 轴向位置滑块 | 选择截面位置 |
 | 第一部分：刚度分析 | 3 指标 + 3 曲线 + 力-位移曲线 + 方案对比 + 截面图 + 贡献图 |
-| 第二部分：强度分析 | 4 指标 + 3 曲线 + 3 候选层表 |
+| 第二部分：强度分析 | 4 指标 + 3 曲线 + 三张候选/贡献层表 |
 | 参数明细表 | 当前截面所有层参数 |
 | 导出功能 | 3 个导出按钮 |
 
@@ -937,15 +1010,17 @@ with st.expander("6. 强度分析", expanded=False):
 | **My** | N·mm | 弯曲屈服力矩 |
 | **Fc** | N | 压扁起始屈服力 |
 
-## 弯曲屈服控制层
+## 弯曲屈服候选层表
 
-各层曲率相同，表面应力与轴向模量和外半径相关。逐层计算该层表面达到抗拉强度时所需的整体弯矩，取最小值对应层为控制层。
+每层的"屈服弯矩"含义：当该层表面刚好达到抗拉强度时，整体截面所承受的弯矩。整体弯曲屈服力矩取所有层中的最小值。
 
-## 压扁屈服控制层
+表格另外给出**整体屈服时刻每层实际承担的弯矩和占比**，方便看各层弯矩分配。
 
-各层应变相同。逐层计算该层的屈服应变（抗拉强度除以环向模量），取最小值对应层为控制层。
+## 压扁屈服候选层表
 
-弹簧圈通常环向模量极高但抗拉强度相对有限，屈服应变最小，是压扁屈服的控制器。
+每层的"屈服力"含义：当该层表面刚好达到抗拉强度时，整体截面所承受的对径压力。整体压扁屈服力取所有层中的最小值。
+
+表格另外给出**整体屈服时刻每层实际承担的弯矩和占比**，方便看各层弯矩分配。
 
 ## 轴向拉力分解
 
@@ -1269,14 +1344,11 @@ A：控制层由轴向模量、外半径、抗拉强度三者共同决定。
 **Q5：为什么弹簧圈是压扁屈服控制层？**
 A：弹簧圈屈服应变（抗拉强度除以环向模量）最小。
 
-**Q5b：修正系数怎么标定？**
-A：见第 9 节，从拉伸和压缩实验反推。
+**Q6：弯曲/压扁候选层表的"实际承担弯矩"是什么？**
+A：整体屈服时刻，各层按自身 EI 比例分到的实际弯矩。它们相加等于整体屈服弯矩。控制层是候选值最小的那一层。
 
-**Q6：c 应该填多少？**
+**Q7：c 应该填多少？**
 A：没有实验时默认 1.0。做过实验后，调 c 让曲线形状与实测接近。
-
-**Q7：为什么多条曲线颜色看不清？**
-A：方案数多时建议只保留 3~5 个对比。
 
 **Q8：为什么 Scheme 的 Kp 和 Current 差很多？**
 A：方案是快照，保存时的参数可能和现在不同。看图例里的 Kp_corr 和 c 值。
@@ -1575,8 +1647,8 @@ else:
                     s_EA_x, s_EI_x, s_Kp_x, _, _, _, _, _ = compute_stiffness(
                         s_layers_cmp, p['ea_correction'], p['kp_correction'])
                     s_Fu_x, _ = compute_axial_strength(s_layers_cmp)
-                    s_My_x, _, _ = compute_bending_yield(s_layers_cmp)
-                    s_Fc_x, _, _ = compute_collapse_force(s_layers_cmp)
+                    s_My_x, _, _, _ = compute_bending_yield(s_layers_cmp)
+                    s_Fc_x, _, _, _ = compute_collapse_force(s_layers_cmp)
                     scheme_label = sch['name'] + (' (当前)' if sch['is_current'] else '')
                     compare_rows.append({
                         '方案': scheme_label,
@@ -1671,8 +1743,8 @@ st.caption(f"强度描述导管能承受的极限载荷。弯曲按三点弯曲�
 
 if layers:
     Fu, Fu_layer = compute_axial_strength(layers)
-    My, bending_ctrl, bending_cands = compute_bending_yield(layers)
-    Fc, collapse_ctrl, collapse_cands = compute_collapse_force(layers)
+    My, bending_ctrl, bending_cands, bending_contribs = compute_bending_yield(layers)
+    Fc, collapse_ctrl, collapse_cands, collapse_contribs = compute_collapse_force(layers)
 
     Fy_bending = 4 * My / L_span if L_span > 0 else 0.0
 
@@ -1722,34 +1794,66 @@ if layers:
     fig_t.tight_layout(rect=[0, 0, 1, 0.96])
     st.pyplot(fig_t)
 
-    st.subheader("弯曲屈服 — 候选层")
+    # ============================================================
+    # 弯曲屈服 — 各层贡献表
+    # ============================================================
+    st.subheader("弯曲屈服 — 各层贡献")
+    st.caption(
+        "表格说明：整体弯曲屈服力矩取所有层候选值的最小值。"
+        "各层\"实际承担弯矩\"是整体屈服时刻每层按刚度比例分到的弯矩，"
+        "相加等于整体屈服弯矩。控制层是候选值最小的那一层。"
+    )
+
+    # 构建表格：以 contributions 为主，加入候选值和层参数
+    b_ctrl_dict = {c['layer']: c for c in bending_cands}
     b_rows = []
-    for c in bending_cands:
-        M_i = c['M_y']
-        F_i = 4 * M_i / L_span if L_span > 0 else 0.0
+    for contrib in bending_contribs:
+        layer_name = contrib['layer']
+        cand = b_ctrl_dict.get(layer_name, {})
         b_rows.append({
-            "层": c['layer'],
-            "轴向模量 (MPa)": f"{c['E_z']:.1f}",
-            "外半径 (mm)": f"{c['r_out']:.4f}",
-            "抗拉强度 (MPa)": f"{c['sigma_uts']:.1f}",
-            "屈服弯矩 (N·mm)": f"{M_i:.4f}",
-            f"三点弯曲力 (N, L={L_span:.0f}mm)": f"{F_i:.4f}"
+            "层": layer_name,
+            "轴向模量 (MPa)": f"{cand.get('E_z', 0):.1f}",
+            "外半径 (mm)": f"{cand.get('r_out', 0):.4f}",
+            "抗拉强度 (MPa)": f"{cand.get('sigma_uts', 0):.1f}",
+            "该层屈服时整体弯矩 (N·mm)": f"{cand.get('M_y', 0):.4f}",
+            "整体屈服时该层承担弯矩 (N·mm)": f"{contrib['M_actual']:.4f}",
+            "占比 (%)": f"{contrib['pct']:.2f}%",
+            "是否控制层": "★" if contrib['is_ctrl'] else "",
+            f"三点弯曲力 (N, L={L_span:.0f}mm)": f"{4 * cand.get('M_y', 0) / L_span:.4f}" if L_span > 0 else "—"
         })
     st.dataframe(pd.DataFrame(b_rows), use_container_width=True)
 
-    st.subheader("压扁屈服 — 候选层")
+    # ============================================================
+    # 压扁屈服 — 各层贡献表
+    # ============================================================
+    st.subheader("压扁屈服 — 各层贡献")
+    st.caption(
+        "表格说明：整体压扁屈服力取所有层候选值的最小值。"
+        "各层\"实际承担弯矩\"是整体屈服时刻每层按刚度比例分到的弯矩，"
+        "相加等于整体屈服时的最大弯矩。控制层是候选值最小的那一层。"
+    )
+
+    c_ctrl_dict = {c['layer']: c for c in collapse_cands}
     c_rows = []
-    for c in collapse_cands:
+    for contrib in collapse_contribs:
+        layer_name = contrib['layer']
+        cand = c_ctrl_dict.get(layer_name, {})
         c_rows.append({
-            "层": c['layer'],
-            "环向模量 (MPa)": f"{c['E_theta']:.1f}",
-            "壁厚 (mm)": f"{c['t']:.4f}",
-            "抗拉强度 (MPa)": f"{c['sigma_uts']:.1f}",
-            "屈服应变 ε_y = σ/E": f"{c['sigma_uts']/c['E_theta']*100:.2f}%",
-            "屈服力 (N)": f"{c['F_c']:.4f}"
+            "层": layer_name,
+            "环向模量 (MPa)": f"{cand.get('E_theta', 0):.1f}",
+            "壁厚 (mm)": f"{cand.get('t', 0):.4f}",
+            "抗拉强度 (MPa)": f"{cand.get('sigma_uts', 0):.1f}",
+            "屈服应变 ε_y = σ/E": f"{cand.get('sigma_uts', 0) / cand.get('E_theta', 1) * 100:.2f}%" if cand.get('E_theta', 0) > 0 else "—",
+            "该层屈服时整体受力 (N)": f"{cand.get('F_c', 0):.4f}",
+            "整体屈服时该层承担弯矩 (N·mm)": f"{contrib['M_actual']:.4f}",
+            "占比 (%)": f"{contrib['pct']:.2f}%",
+            "是否控制层": "★" if contrib['is_ctrl'] else ""
         })
     st.dataframe(pd.DataFrame(c_rows), use_container_width=True)
 
+    # ============================================================
+    # 轴向拉力 — 各层贡献表
+    # ============================================================
     st.subheader("轴向拉力 — 各层贡献")
     fu_rows = []
     for i, l in enumerate(layers):
@@ -1883,8 +1987,8 @@ with exp_col3:
                             s_EA_x, s_EI_x, s_Kp_x, _, _, _, _, _ = compute_stiffness(
                                 s_layers_export, p['ea_correction'], p['kp_correction'])
                             s_Fu_x, _ = compute_axial_strength(s_layers_export)
-                            s_My_x, _, _ = compute_bending_yield(s_layers_export)
-                            s_Fc_x, _, _ = compute_collapse_force(s_layers_export)
+                            s_My_x, _, _, _ = compute_bending_yield(s_layers_export)
+                            s_Fc_x, _, _, _ = compute_collapse_force(s_layers_export)
                             compare_rows_export.append({
                                 '方案': sch['name'] + (' (当前)' if sch['is_current'] else ''),
                                 'Kp 修正系数': p['kp_correction'],
