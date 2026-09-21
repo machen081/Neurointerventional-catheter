@@ -5,7 +5,6 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import io
 
-# 尝试导入 openpyxl（Excel 导出需要）
 try:
     import openpyxl
     HAS_OPENPYXL = True
@@ -15,7 +14,6 @@ except ImportError:
 st.set_page_config(page_title="微导管多层结构分析", layout="wide")
 
 # ==================== 材料库 ====================
-# 普通材料典型值（室温，25°C）
 MATERIAL_LIBRARY_NORMAL = {
     "自定义": None,
     "PTFE (块体)": {"E": 500.0, "sigma": 106.2},
@@ -31,7 +29,6 @@ MATERIAL_LIBRARY_NORMAL = {
     "聚乙烯 (HDPE)": {"E": 900.0, "sigma": 25.0},
 }
 
-# 丝材典型值（用于编织层和弹簧圈的丝材）
 MATERIAL_LIBRARY_WIRE = {
     "自定义": None,
     "不锈钢 304 (冷加工)": {"E_f": 193000.0, "sigma_f": 2200.0},
@@ -41,19 +38,6 @@ MATERIAL_LIBRARY_WIRE = {
     "铂钨合金": {"E_f": 170000.0, "sigma_f": 800.0},
 }
 
-# 全局单位说明
-UNIT_INFO = {
-    "长度": "mm",
-    "弹性模量": "MPa",
-    "抗拉强度": "MPa",
-    "力": "N",
-    "刚度 EA": "N",
-    "刚度 EI": "N·mm²",
-    "刚度 Kp": "N/mm",
-    "力矩 My": "N·mm",
-}
-
-# ==================== 层类型定义 ====================
 LAYER_TYPES = {
     '普通材料': {
         'columns': ['起始位置(mm)', '结束位置(mm)', '内半径(mm)', '外半径(mm)',
@@ -140,7 +124,7 @@ def normalize_structure(structure):
     return structure
 
 # ==================== 会话状态 ====================
-CURRENT_VERSION = "v17_units_library_export"
+CURRENT_VERSION = "v20_nonlinear_crush"
 
 if 'structure_version' not in st.session_state or st.session_state.structure_version != CURRENT_VERSION:
     st.session_state.structure = create_default_structure()
@@ -151,6 +135,7 @@ if 'structure_version' not in st.session_state or st.session_state.structure_ver
     st.session_state.kp_correction = 1.0
     st.session_state.span_L = 30.0
     st.session_state.eta_bond = 0.8
+    st.session_state.softening_c = 1.0
 else:
     st.session_state.structure = normalize_structure(st.session_state.structure)
 
@@ -160,6 +145,7 @@ if 'ea_correction' not in st.session_state: st.session_state.ea_correction = 1.0
 if 'kp_correction' not in st.session_state: st.session_state.kp_correction = 1.0
 if 'span_L' not in st.session_state: st.session_state.span_L = 30.0
 if 'eta_bond' not in st.session_state: st.session_state.eta_bond = 0.8
+if 'softening_c' not in st.session_state: st.session_state.softening_c = 1.0
 
 # ==================== 分段查找 ====================
 def find_segment(df, x):
@@ -432,7 +418,7 @@ def compute_stiffness(layers, ea_corr=1.0, kp_corr=1.0):
 
     return EA, EI, Kp, EA_c, EI_c, Kp_c, model_used, thick_ratio
 
-# ==================== 强度：轴向拉力 ====================
+# ==================== 强度计算 ====================
 def compute_axial_strength(layers):
     Fu_layer = []
     for l in layers:
@@ -447,7 +433,6 @@ def compute_axial_strength(layers):
             Fu_layer.append(sigma_uts * A_i * V_f)
     return sum(Fu_layer), Fu_layer
 
-# ==================== 强度：弯曲屈服 ====================
 def compute_bending_yield(layers):
     if not layers:
         return 0.0, None, []
@@ -473,7 +458,6 @@ def compute_bending_yield(layers):
     candidates.sort(key=lambda c: c['M_y'])
     return candidates[0]['M_y'], candidates[0]['layer'], candidates
 
-# ==================== 强度：压扁屈服 ====================
 def compute_collapse_force(layers):
     if not layers:
         return 0.0, None, []
@@ -503,6 +487,21 @@ def compute_collapse_force(layers):
         return 0.0, None, []
     candidates.sort(key=lambda c: c['F_c'])
     return candidates[0]['F_c'], candidates[0]['layer'], candidates
+
+# ==================== 非线性力-位移模型 ====================
+def compute_crush_force_nonlinear(Kp, D_outer, dD, c=1.0):
+    """
+    非线性力-位移模型：
+      F(ΔD) = Kp · ΔD / (1 + c · ΔD / D_outer)
+
+    - ΔD 小时：F ≈ Kp · ΔD（线性）
+    - ΔD 大时：F 趋于上限 Kp · D_outer / c（软化）
+    - c = 0：退化为完全线性
+    """
+    if D_outer <= 0:
+        return Kp * dD
+    dD = np.asarray(dD)
+    return Kp * dD / (1.0 + c * dD / D_outer)
 
 # ==================== 沿长度扫描 ====================
 def compute_along_length(structure, L_total, ea_corr=1.0, kp_corr=1.0, eta_bond=1.0, n=200):
@@ -549,48 +548,72 @@ with st.sidebar:
 
     for i, layer in enumerate(st.session_state.structure):
         with st.expander(f"第{i+1}层：{layer['name']}（{layer['type']}）", expanded=False):
-            # ---- 材料库下拉 ----
             if layer['type'] == '普通材料':
                 mat_options = list(MATERIAL_LIBRARY_NORMAL.keys())
-                selected_mat = st.selectbox(
-                    "📚 快速填入材料典型值（室温）",
-                    mat_options,
-                    key=f"mat_select_{i}"
-                )
-                col_a, col_b = st.columns([1, 1])
+                selected_mat = st.selectbox("📚 材料库（室温典型值）", mat_options, key=f"mat_select_{i}")
+                df_cur = layer['data']
+                n_rows = len(df_cur)
+                if n_rows > 0 and selected_mat != "自定义":
+                    seg_labels = ["🎯 全部段"] + [
+                        f"第 {j+1} 段 ({df_cur.iloc[j]['起始位置(mm)']:.1f} ~ {df_cur.iloc[j]['结束位置(mm)']:.1f} mm)"
+                        for j in range(n_rows)
+                    ]
+                    selected_seg = st.selectbox("应用范围", seg_labels, key=f"seg_select_{i}")
+                else:
+                    selected_seg = "🎯 全部段"
+
+                col_a, col_b = st.columns([1, 2])
                 with col_a:
-                    if st.button("填入该材料", key=f"apply_mat_{i}") and selected_mat != "自定义":
+                    if st.button("填入", key=f"apply_mat_{i}") and selected_mat != "自定义":
                         mat = MATERIAL_LIBRARY_NORMAL[selected_mat]
-                        df = layer['data'].copy()
-                        df['弹性模量(MPa)'] = mat['E']
-                        df['抗拉强度(MPa)'] = mat['sigma']
-                        layer['data'] = df
-                        st.rerun()
+                        df_new = layer['data'].copy()
+                        if len(df_new) > 0:
+                            if selected_seg == "🎯 全部段":
+                                df_new['弹性模量(MPa)'] = mat['E']
+                                df_new['抗拉强度(MPa)'] = mat['sigma']
+                            else:
+                                seg_idx = seg_labels.index(selected_seg) - 1
+                                df_new.loc[df_new.index[seg_idx], '弹性模量(MPa)'] = mat['E']
+                                df_new.loc[df_new.index[seg_idx], '抗拉强度(MPa)'] = mat['sigma']
+                            layer['data'] = df_new
+                            st.rerun()
                 with col_b:
                     if selected_mat != "自定义":
-                        st.caption(f"E={MATERIAL_LIBRARY_NORMAL[selected_mat]['E']} MPa, σ={MATERIAL_LIBRARY_NORMAL[selected_mat]['sigma']} MPa")
+                        st.caption(f"E = {MATERIAL_LIBRARY_NORMAL[selected_mat]['E']} MPa, σ_uts = {MATERIAL_LIBRARY_NORMAL[selected_mat]['sigma']} MPa")
 
             elif layer['type'] in ('编织层', '弹簧圈'):
                 mat_options = list(MATERIAL_LIBRARY_WIRE.keys())
-                selected_mat = st.selectbox(
-                    "📚 快速填入丝材典型值（室温）",
-                    mat_options,
-                    key=f"mat_select_{i}"
-                )
-                col_a, col_b = st.columns([1, 1])
+                selected_mat = st.selectbox("📚 丝材库（室温典型值）", mat_options, key=f"mat_select_{i}")
+                df_cur = layer['data']
+                n_rows = len(df_cur)
+                if n_rows > 0 and selected_mat != "自定义":
+                    seg_labels = ["🎯 全部段"] + [
+                        f"第 {j+1} 段 ({df_cur.iloc[j]['起始位置(mm)']:.1f} ~ {df_cur.iloc[j]['结束位置(mm)']:.1f} mm)"
+                        for j in range(n_rows)
+                    ]
+                    selected_seg = st.selectbox("应用范围", seg_labels, key=f"seg_select_{i}")
+                else:
+                    selected_seg = "🎯 全部段"
+
+                col_a, col_b = st.columns([1, 2])
                 with col_a:
-                    if st.button("填入该材料", key=f"apply_mat_{i}") and selected_mat != "自定义":
+                    if st.button("填入", key=f"apply_mat_{i}") and selected_mat != "自定义":
                         mat = MATERIAL_LIBRARY_WIRE[selected_mat]
-                        df = layer['data'].copy()
-                        df['丝材模量(MPa)'] = mat['E_f']
-                        df['丝材抗拉强度(MPa)'] = mat['sigma_f']
-                        layer['data'] = df
-                        st.rerun()
+                        df_new = layer['data'].copy()
+                        if len(df_new) > 0:
+                            if selected_seg == "🎯 全部段":
+                                df_new['丝材模量(MPa)'] = mat['E_f']
+                                df_new['丝材抗拉强度(MPa)'] = mat['sigma_f']
+                            else:
+                                seg_idx = seg_labels.index(selected_seg) - 1
+                                df_new.loc[df_new.index[seg_idx], '丝材模量(MPa)'] = mat['E_f']
+                                df_new.loc[df_new.index[seg_idx], '丝材抗拉强度(MPa)'] = mat['sigma_f']
+                            layer['data'] = df_new
+                            st.rerun()
                 with col_b:
                     if selected_mat != "自定义":
-                        st.caption(f"E_f={MATERIAL_LIBRARY_WIRE[selected_mat]['E_f']} MPa, σ_f={MATERIAL_LIBRARY_WIRE[selected_mat]['sigma_f']} MPa")
+                        st.caption(f"E_f = {MATERIAL_LIBRARY_WIRE[selected_mat]['E_f']} MPa, σ_f = {MATERIAL_LIBRARY_WIRE[selected_mat]['sigma_f']} MPa")
 
-            # ---- 名称和类型 ----
             col1, col2, col3 = st.columns([2, 2, 1])
             with col1:
                 new_name = st.text_input("名称（图表中显示）", value=layer['name'], key=f"name_{i}")
@@ -618,7 +641,7 @@ with st.sidebar:
                 layer['data'],
                 num_rows="dynamic",
                 use_container_width=True,
-                key=f"data_{i}_v17"
+                key=f"data_{i}_v20"
             )
             if edited is not None and not edited.empty:
                 layer['data'] = edited.copy()
@@ -634,6 +657,23 @@ with st.sidebar:
                                     value=float(st.session_state.kp_correction),
                                     step=0.01, format="%.3f", key="kp_corr_input")
     st.session_state.kp_correction = kp_correction
+
+    st.markdown("---")
+    st.markdown("**抗压扁非线性参数**")
+    softening_c = st.number_input(
+        "软化系数 c（越大越软）",
+        min_value=0.0, max_value=10.0,
+        value=float(st.session_state.softening_c),
+        step=0.1, format="%.2f",
+        key="softening_c_input"
+    )
+    st.session_state.softening_c = softening_c
+    st.caption(
+        "c = 0：完全线性（旧行为）\n"
+        "c = 1：中等软化（默认）\n"
+        "c = 3：强软化（薄壁易压溃）\n"
+        "公式：F = Kp·ΔD / (1 + c·ΔD/D)"
+    )
 
     st.markdown("---")
     st.markdown("**抗拉强度参数**")
@@ -657,9 +697,10 @@ with st.sidebar:
     if st.button("恢复示例数据"):
         keys_to_clear = [k for k in list(st.session_state.keys())
                          if k.startswith("data_") or k.startswith("name_") or k.startswith("type_")
-                         or k.startswith("mat_select_") or k.startswith("apply_mat_")
+                         or k.startswith("mat_select_") or k.startswith("seg_select_")
+                         or k.startswith("apply_mat_")
                          or k in ("ea_corr_input", "kp_corr_input", "span_L_input", "eta_bond_input",
-                                  "new_type", "insert_pos", "add_layer_btn")]
+                                  "softening_c_input", "new_type", "insert_pos", "add_layer_btn")]
         for k in keys_to_clear:
             del st.session_state[k]
         st.session_state.structure = create_default_structure(L_total)
@@ -668,20 +709,19 @@ with st.sidebar:
         st.session_state.kp_correction = 1.0
         st.session_state.span_L = 30.0
         st.session_state.eta_bond = 0.8
+        st.session_state.softening_c = 1.0
         st.rerun()
 
 # ==================== 主区域 ====================
 st.header("微导管多层结构分析")
 
-# 全局单位说明
 st.caption(
     "**单位约定** — 长度: mm | 弹性模量/抗拉强度: MPa | 力: N | "
-    "轴向刚度 EA: N | 弯曲刚度 EI: N·mm² | 抗压扁刚度 Kp: N/mm | 力矩 My: N·mm | "
-    "温度: 室温 25°C（如需体温修正，请调整模量或修正系数）"
+    "轴向刚度 EA: N | 弯曲刚度 EI: N·mm² | 抗压扁刚度 Kp: N/mm | 力矩 My: N·mm"
 )
 
 # ============================================================
-# 📖 使用说明书（可折叠）
+# 📖 使用说明书
 # ============================================================
 with st.expander("📖 使用说明书（点击展开）", expanded=False):
     st.markdown("""
@@ -689,10 +729,10 @@ with st.expander("📖 使用说明书（点击展开）", expanded=False):
 
 本工具用于微导管多层结构的**刚度**和**强度**分析。
 
-- **刚度**：描述导管抵抗变形的能力（EA 轴向、EI 弯曲、Kp 抗压扁）
-- **强度**：描述导管能承受的极限载荷（Fu 轴向拉力、My 弯曲屈服、Fc 压扁屈服）
+- **刚度**：EA 轴向、EI 弯曲、Kp 抗压扁
+- **强度**：Fu 轴向拉力、My 弯曲屈服、Fc 压扁屈服
 
-**注意**：本工具是**设计筛选工具**，不是实验替代品。绝对值需要一次实验标定（见第七节）。
+**注意**：本工具是**设计筛选工具**，不是实验替代品。
 
 ---
 
@@ -707,40 +747,17 @@ with st.expander("📖 使用说明书（点击展开）", expanded=False):
 | 抗压扁刚度 Kp | N/mm |
 | 力矩 My | N·mm |
 
-所有输入均按**室温 25°C** 处理。如需考虑体温（37°C），请手动下调模量（Pebax 大约降 20~30%）或使用修正系数。
-
 ---
 
-# 三、界面布局
+# 三、材料库使用
 
-## 侧边栏（左侧）
+每层编辑区顶部有"📚 材料库"下拉菜单：
 
-- **导管总长度**：整根导管的总长（mm）
-- **添加新层**：在指定位置插入新层
-- **编辑各层**：每层可展开，包含：
-  - **📚 快速填入材料典型值**（下拉菜单，一键填 E 和 σ_uts）
-  - 名称、类型切换、删除
-  - 数据表格（可动态增删行，实现沿轴向分段）
-- **刚度修正系数**：EA、Kp 的实验标定折减
-- **抗拉强度参数**：热熔填充粘接系数 η
-- **三点弯曲试验参数**：跨距 L
-- **强制刷新计算**、**恢复示例数据**
+1. **选择材料**
+2. **选择应用范围**：`🎯 全部段` 或 `第 N 段`
+3. **点击"填入"**：将材料参数写入指定范围
 
-## 主区域（右侧）
-
-- **轴向位置滑块**：选择截面位置
-- **刚度分析**：三指标 + 三曲线 + 截面图 + 贡献图
-- **强度分析**：三指标 + 三曲线 + 三张候选层表
-- **参数明细表**：当前截面的所有层参数
-- **导出**：CSV / Excel 下载
-
----
-
-# 四、材料库
-
-侧边栏每层的"📚 快速填入材料典型值"下拉菜单提供常见材料的室温典型值：
-
-## 普通材料
+## 普通材料库
 
 | 材料 | E (MPa) | σ_uts (MPa) |
 |---|---|---|
@@ -756,7 +773,7 @@ with st.expander("📖 使用说明书（点击展开）", expanded=False):
 | 聚氨酯 | 30 | 30 |
 | 聚乙烯 (HDPE) | 900 | 25 |
 
-## 丝材
+## 丝材库
 
 | 材料 | E_f (MPa) | σ_f (MPa) |
 |---|---|---|
@@ -766,82 +783,95 @@ with st.expander("📖 使用说明书（点击展开）", expanded=False):
 | 钴铬合金 (L605) | 220000 | 2500 |
 | 铂钨合金 | 170000 | 800 |
 
-选择材料后点击"填入该材料"按钮，将材料参数覆盖到该层**所有行**。
+---
+
+# 四、刚度分析
+
+| 指标 | 物理意义 |
+|---|---|
+| **EA (N)** | 把导管拉长 100% 需要的力 |
+| **EI (N·mm²)** | 把导管弯成单位曲率需要的弯矩 |
+| **Kp (N/mm)** | 对径压力下直径减小 1 mm 需要的力（初始线性刚度） |
 
 ---
 
-# 五、刚度分析
+# 五、非线性力-位移曲线（重点）
 
-## 5.1 三个指标
+## 5.1 为什么需要非线性模型
 
-| 指标 | 单位 | 物理意义 |
+线弹性外推 **F = Kp × ΔD** 只在极小变形下成立。当 ΔD 增大，导管会发生：
+
+1. **截面椭圆化**：不再是圆形，弯曲刚度急剧下降
+2. **材料屈服**：外层热熔层先屈服，进入塑性
+3. **层间滑移**：各层不再同步变形
+4. **几何软化**：整体刚度随变形增大而下降
+
+结果：**实际力-位移曲线是向下弯曲的**，而非直线。
+
+## 5.2 本工具采用的非线性模型
+
+$$F(\\Delta D) = \\frac{K_p \\cdot \\Delta D}{1 + c \\cdot \\Delta D / D_{outer}}$$
+
+参数：
+- $K_p$：初始线性刚度（N/mm）
+- $D_{outer}$：导管外径（mm）
+- $c$：软化系数（无量纲）
+
+**特性**：
+| ΔD | 行为 |
+|---|---|
+| → 0 | F ≈ Kp × ΔD（线性段） |
+| 增大 | 分母增大，F 增长变慢（软化） |
+| → ∞ | F 趋于上限 Kp × D_outer / c |
+
+## 5.3 软化系数 c 的选取
+
+| c 值 | 行为 | 适用场景 |
 |---|---|---|
-| **Axial Stiffness EA** | N | 把导管拉长 100% 需要的力 |
-| **Bending Stiffness EI** | N·mm² | 把导管弯成单位曲率需要的弯矩 |
-| **Crush Stiffness Kp** | N/mm | 对径压力下直径减小 1 mm 需要的力 |
+| **0** | 完全线性 | 仅供对比，不真实 |
+| **0.5** | 轻微软化 | 厚壁、刚性导管 |
+| **1.0** | 中等软化 | 默认，大多数微导管 |
+| **2.0** | 明显软化 | 薄壁、柔性导管 |
+| **3.0** | 强软化 | 极易压溃 |
 
-## 5.2 三张沿长度曲线
+## 5.4 与实验的关系
 
-横轴是轴向位置（mm），纵轴分别是 EA、EI、Kp。
+如果做过平板压缩实验，可以把实验的 F(1mm)、F(2mm) 与理论值对比：
 
-**读图要点**：
-- **台阶**对应结构变化
-- **灰色虚线**是当前滑块位置
-- 曲线下降 = 缺少增强层（被热熔填充替代）
+- **实测 F(1mm) / 理论 F(1mm)** → 调整 Kp 修正系数
+- **实测曲线的弯曲程度** → 调整软化系数 c
 
-## 5.3 截面图
+如果 c = 0 时 F(1mm) 偏高但 F(2mm) 偏差更大，说明实际有软化，需要增大 c。
 
-- **斜线**：编织层
-- **叉线**：弹簧圈
-- **点线**：热熔填充层
-- **纯色**：普通材料层
+## 5.5 曲线图解读
 
-## 5.4 贡献条形图
+主区域有两条曲线：
 
-三张图分别显示每层对 EA、EI、Kp 的贡献百分比。**找出主力层**。
+- **灰色虚线**：线弹性外推（c = 0 的极端情况）
+- **红色实线**：当前非线性模型
 
-## 5.5 壁厚比提示
+图上标注：
+- ΔD = 1mm 和 2mm 处的 F 值（蓝、绿圆点）
+- 完全压扁位置（ΔD = 外径）
+- 外径 10% 的小变形线性区（绿色阴影）
 
-- 蓝框（< 0.1）：薄壁，Kp 可信
-- 黄框（0.1~0.5）：厚壁，Kp 有 10~40% 偏差
-- 红框（≥ 0.5）：极厚壁，需实验标定
+两条曲线的**偏离程度**反映软化的强度。
 
 ---
 
 # 六、强度分析
 
-## 6.1 三个指标
+| 指标 | 物理意义 |
+|---|---|
+| **Fu (N)** | 拉断/拉屈服力 |
+| **My (N·mm)** | 弯曲屈服力矩 |
+| **Fc (N)** | 压扁起始屈服力 |
 
-| 指标 | 单位 | 物理意义 |
-|---|---|---|
-| **Axial Tensile Force Fu** | N | 拉断/拉屈服力 |
-| **Bending Yield Moment My** | N·mm | 弯曲屈服力矩 |
-| **Bending Yield Force (3-pt)** | N | 三点弯曲换算的力 |
-| **Collapse Force Fc** | N | 压扁起始屈服力 |
+**弯曲屈服控制层**：M_i = σ_uts,i · EI_total / (E_z,i · r_out,i)，最小者控制。
 
-## 6.2 弯曲屈服控制层
+**压扁屈服控制层**：ε_y,i = σ_uts,i / E_θ,i，最小者控制。弹簧圈通常最小。
 
-弯曲时各层**曲率相同**，表面应力 σ_i = E_z,i · κ · r_out,i。
-
-令 σ_i = σ_uts,i 得 M_i = σ_uts,i · EI_total / (E_z,i · r_out,i)。
-
-**谁 M_i 最小谁控制。** 最外层只满足 r_out 大，不一定控制。
-
-## 6.3 压扁屈服控制层
-
-各层**应变相同**，屈服应变为 ε_y,i = σ_uts,i / E_θ,i。
-
-**谁 ε_y 最小谁控制。** 弹簧圈通常 E_θ 极高而 σ_uts 相对有限，ε_y 最小，所以是控制层。
-
-## 6.4 轴向拉力贡献
-
-每层 Fu 由两部分组成：
-- **Fu_fiber**：丝材/弹簧贡献
-- **Fu_matrix**：热熔填充贡献（通过 η 折减）
-
-**弹簧圈层**：弹簧丝只占 ~13% 截面积，热熔填充占 ~87%，后者贡献往往更大。
-
-**编织层**：丝材贡献 σ·A·V_f；热熔填充贡献 η·σ_hm·A·(1−V_f−V_matrix)。
+**轴向拉力**：弹簧圈/编织层的 Fu = 丝材贡献 + 热熔填充贡献（含 η 折减）。
 
 ---
 
@@ -859,104 +889,65 @@ with st.expander("📖 使用说明书（点击展开）", expanded=False):
 
 ## 抗拉粘接系数 η
 
-热熔填充与丝材的粘接程度：
 - η = 1.0：完全粘接
 - η = 0.5：明显滑移
-- η = 0.8：默认值（机械互锁，轻微滑移）
+- η = 0.8：默认（机械互锁）
 
 ---
 
 # 八、导出功能
 
-主区域底部有三个导出按钮：
-
-1. **当前截面参数表 CSV**：当前滑块位置的所有层参数
-2. **沿长度曲线 CSV**：200 个采样点的 EA、EI、Kp、Fu、My、Fc
-3. **完整报告 Excel**：包含输入参数、所有层数据、沿长度曲线（多 sheet）
-
-Excel 导出需要 `openpyxl` 库（`pip install openpyxl`）。CSV 导出无依赖。
+- **📄 当前截面参数表 (CSV)**
+- **📈 沿长度曲线数据 (CSV)**
+- **📊 完整报告 (Excel)**：含力-位移曲线 sheet（线性 + 非线性两列）
 
 ---
 
 # 九、如何验证
 
-## 刚度实验
-
 | 刚度 | 实验方法 | 公式 |
 |---|---|---|
 | EA | 拉伸 | EA = k × L₀ |
 | EI | 三点弯曲 | EI = FL³/(48δ) |
-| Kp | 平板压缩 | Kp = F/ΔD |
+| Kp | 平板压缩 | 初始斜率 |
 
-## 强度实验
-
-| 强度 | 实验方法 | 对应指标 |
-|---|---|---|
-| Fu | 拉伸至断裂 | 曲线最高点 |
-| My | 三点弯曲至屈服 | 曲线偏离线性的点 |
-| Fc | 平板压缩至屈服 | 曲线偏离线性的点 |
-
-## 验证流程
-
-1. 做一次标定实验
-2. 修正系数 = 实测 / 理论
-3. 填入工具
-4. 再做一根不同结构的验证
-5. 误差 < 20% 则工具可信
+**标定流程**：
+1. 做一次标准实验，记录力-位移曲线
+2. 拟合初始段斜率 → Kp
+3. 拟合曲线弯曲程度 → 软化系数 c
+4. 填入侧边栏
 
 ---
 
-# 十、整体读图顺序
+# 十、常见问题
 
-1. **拖滑块**到感兴趣的轴向位置
-2. **看三个刚度指标**
-3. **看刚度曲线**，了解整根导管的分布
-4. **看截面图和贡献图**，找出主导层
-5. **看强度指标和强度曲线**，评估安全裕度
-6. **查候选层表格**，知道哪个层是强度控制层
-7. **核对参数表**，确认输入无误
-8. **导出报告**（如需要）
+**Q1：c 应该填多少？**
+A：没有实验时，默认 1.0。做过实验后，调 c 使曲线形状与实测接近。
 
----
+**Q2：为什么曲线会下弯？**
+A：反映真实导管的几何和材料非线性。c 越大，下弯越明显。
 
-# 十一、常见问题
+**Q3：完全线性（c=0）还能用吗？**
+A：能，但只适用于极小变形（ΔD < 5% 外径）。大变形下会严重高估。
 
-**Q1：算出来 Kp 太大？**
-A：Kp 是线性小变形刚度，真实值需乘修正系数 0.3~0.5。
-
-**Q2：为什么 Coil 层改了模量，强度 Fu 没变？**
-A：Fu 只取决于抗拉强度 σ_uts，与弹性模量 E 无关。
-
-**Q3：为什么弹簧圈层 Fu 有多个分量？**
-A：弹簧圈层的轴向拉力 = 弹簧丝贡献 + 热熔填充贡献。后者往往更大。
-
-**Q4：为什么弯曲屈服不是最外层控制？**
-A：M_i = σ_uts,i · EI_total / (E_z,i · r_out,i)，谁 M_i 最小谁控制。
-
-**Q5：为什么弹簧圈是压扁屈服控制层？**
-A：弹簧圈屈服应变 ε_y = σ_uts/E_θ ≈ 8.5%，是所有层中最小的。
-
-**Q6：改了参数图表没更新？**
+**Q4：改了参数图表没更新？**
 A：按一次 Enter，或点「🔄 强制刷新计算」。
 
-**Q7：为什么快速填入材料后还是旧值？**
-A：点"填入该材料"按钮后会自动刷新。如果没刷新，再点一次「🔄 强制刷新计算」。
-
-**Q8：Excel 导出报错？**
-A：需要安装 openpyxl（`pip install openpyxl`）。或改用 CSV 导出。
+**Q5：Excel 导出报错？**
+A：需要安装 openpyxl。
 
 ---
 
-# 十二、局限与不能做的事
+# 十一、局限
 
 | 场景 | 是否适用 |
 |---|---|
-| 相对比较两个设计方案 | ✅ 适用 |
-| 参数扫描找最优点 | ✅ 适用 |
-| 早期发现设计缺陷 | ✅ 适用 |
-| 预测绝对刚度值 | ⚠️ 需要标定 |
+| 相对比较两个设计方案 | ✅ |
+| 参数扫描找最优点 | ✅ |
+| 早期发现设计缺陷 | ✅ |
+| 预测绝对刚度值 | ⚠️ 需标定 |
 | 报规格书 | ❌ 需实验 |
-| 预测扭结精确位置 | ❌ 需有限元 |
+| 精确压溃分析 | ❌ 需有限元 |
 | 疲劳寿命 | ❌ 需疲劳实验 |
     """)
 
@@ -970,6 +961,7 @@ ea_correction = st.session_state.ea_correction
 kp_correction = st.session_state.kp_correction
 L_span = st.session_state.span_L
 eta_bond = st.session_state.eta_bond
+softening_c = st.session_state.softening_c
 
 x_pos_safe = min(max(st.session_state.x_pos, 0.0), L_total)
 x_pos = st.slider("Axial position x (mm)", min_value=0.0, max_value=L_total,
@@ -1021,6 +1013,113 @@ else:
 
     fig_s.tight_layout(rect=[0, 0, 1, 0.96])
     st.pyplot(fig_s)
+
+    # ============================================================
+    # 非线性力-位移曲线
+    # ============================================================
+    st.subheader("Crush Force–Displacement Curve (Non-linear)")
+    st.caption(
+        f"当前截面 Kp = {Kp:.3f} N/mm（已应用修正系数 {kp_correction:.3f}）。"
+        f"软化系数 c = {softening_c:.2f}。"
+        f"非线性模型：F = Kp·ΔD / (1 + c·ΔD/D)。"
+    )
+
+    r_outer_max = max(l['r_out'] for l in layers)
+    D_outer = 2 * r_outer_max
+
+    # 曲线数据
+    dD_max = 2.0
+    dD_range = np.linspace(0, dD_max, 300)
+    F_linear = Kp * dD_range
+    F_nonlinear = compute_crush_force_nonlinear(Kp, D_outer, dD_range, softening_c)
+
+    fig_cd, ax_cd = plt.subplots(figsize=(10, 6))
+
+    # 线弹性外推（灰色虚线，作为对比基准）
+    ax_cd.plot(dD_range, F_linear, '--', color='gray', linewidth=1.8,
+               label=f'Linear extrapolation (F = Kp·ΔD)')
+
+    # 非线性曲线（红色实线）
+    ax_cd.plot(dD_range, F_nonlinear, 'r-', linewidth=2.5,
+               label=f'Non-linear model (c = {softening_c:.2f})')
+
+    # 标注 1mm 和 2mm
+    for dD_mark, color in [(1.0, 'blue'), (2.0, 'darkgreen')]:
+        if dD_mark <= dD_max:
+            F_lin_mark = Kp * dD_mark
+            F_nl_mark = compute_crush_force_nonlinear(Kp, D_outer, dD_mark, softening_c)
+
+            # 非线性点
+            ax_cd.plot(dD_mark, F_nl_mark, marker='o', markersize=11, color=color,
+                       markeredgecolor='white', markeredgewidth=1.5, zorder=5)
+            # 线性点（空心）
+            ax_cd.plot(dD_mark, F_lin_mark, marker='o', markersize=8, color=color,
+                       markerfacecolor='white', markeredgewidth=1.5, zorder=4)
+
+            # 注释文本
+            delta_pct = (F_lin_mark - F_nl_mark) / F_lin_mark * 100 if F_lin_mark > 0 else 0
+            ax_cd.annotate(
+                f'ΔD = {dD_mark:.1f} mm\n'
+                f'F (NL) = {F_nl_mark:.3f} N\n'
+                f'F (linear) = {F_lin_mark:.3f} N\n'
+                f'软化: -{delta_pct:.1f}%',
+                xy=(dD_mark, F_nl_mark),
+                xytext=(dD_mark + 0.15, F_nl_mark + 0.05 * max(F_linear)),
+                fontsize=9.5,
+                color=color,
+                bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
+                          edgecolor=color, alpha=0.95),
+                arrowprops=dict(arrowstyle='->', color=color, lw=1.2)
+            )
+
+    # 完全压扁位置
+    if D_outer <= dD_max:
+        ax_cd.axvline(x=D_outer, color='gray', linestyle=':', alpha=0.7,
+                      label=f'Full collapse (ΔD = D = {D_outer:.3f} mm)')
+
+    # 小变形线性区
+    dD_10 = 0.1 * D_outer
+    if dD_10 < dD_max:
+        ax_cd.axvspan(0, dD_10, alpha=0.08, color='green')
+        ax_cd.text(dD_10 / 2, max(F_linear) * 0.05,
+                   '小变形\n线性区', ha='center', fontsize=9, color='green')
+
+    ax_cd.set_xlabel('Diameter reduction ΔD (mm)')
+    ax_cd.set_ylabel('Radial force F (N)')
+    ax_cd.set_title('Crush Force–Displacement Curve (Non-linear Model)')
+    ax_cd.grid(True, linestyle='--', alpha=0.6)
+    ax_cd.legend(loc='upper left', fontsize=10)
+    ax_cd.set_xlim(0, dD_max)
+
+    y_max = max(max(F_linear), max(F_nonlinear)) * 1.15
+    ax_cd.set_ylim(0, y_max)
+
+    fig_cd.tight_layout()
+    st.pyplot(fig_cd)
+
+    # 关键数值表
+    st.markdown("**关键变形量下的力值对比**")
+    table_rows = []
+    for dD_v in [0.1, 0.2, 0.5, 1.0, 1.5, 2.0]:
+        F_lin = Kp * dD_v
+        F_nl = compute_crush_force_nonlinear(Kp, D_outer, dD_v, softening_c)
+        delta_pct = (F_lin - F_nl) / F_lin * 100 if F_lin > 0 else 0
+        table_rows.append({
+            'ΔD (mm)': f"{dD_v:.1f}",
+            'ΔD / 外径': f"{dD_v / D_outer * 100:.1f}%" if D_outer > 0 else "—",
+            '线性 F (N)': f"{F_lin:.4f}",
+            '非线性 F (N)': f"{F_nl:.4f}",
+            '软化幅度': f"-{delta_pct:.1f}%"
+        })
+    st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+
+    # 提示
+    st.info(
+        f"**模型说明**：非线性模型 F = Kp·ΔD / (1 + c·ΔD/D) 中，"
+        f"c 越大曲线越向下弯曲。当前 c = {softening_c:.2f}。"
+        f"如果做过实验，可以调整 c 让曲线形状与实测接近。"
+        f"具体操作：先用 Kp 修正系数对齐小变形段，再用 c 调整大变形段的弯曲程度。"
+    )
 
     st.subheader("Cross-section View")
     fig_c, ax_c = plt.subplots(figsize=(5, 5))
@@ -1105,10 +1204,7 @@ if layers:
               help=f"三点弯曲跨距 L = {L_span:.1f} mm")
     c4.metric("Collapse Force Fc (N)", f"{Fc:.2f}")
 
-    st.info(
-        f"**弯曲屈服控制层**：{bending_ctrl}。"
-        f" **压扁屈服控制层**：{collapse_ctrl}。"
-    )
+    st.info(f"**弯曲屈服控制层**：{bending_ctrl}。**压扁屈服控制层**：{collapse_ctrl}。")
 
     st.subheader("Strength along Length")
     fig_t, axes_t = plt.subplots(3, 1, figsize=(10, 12))
@@ -1227,7 +1323,6 @@ st.subheader("📥 导出结果")
 
 exp_col1, exp_col2, exp_col3 = st.columns(3)
 
-# 1. 当前截面参数表 CSV
 with exp_col1:
     if not param_df.empty:
         csv_bytes = param_df.to_csv(index=False).encode('utf-8-sig')
@@ -1241,7 +1336,6 @@ with exp_col1:
     else:
         st.button("📄 当前截面参数表 (CSV)", disabled=True, key="dl_param_csv_disabled")
 
-# 2. 沿长度曲线 CSV
 with exp_col2:
     curve_df = pd.DataFrame({
         'x_mm': xs,
@@ -1261,20 +1355,17 @@ with exp_col2:
         key="dl_curve_csv"
     )
 
-# 3. 完整报告 Excel
 with exp_col3:
     if HAS_OPENPYXL:
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            # Sheet 1: 概览
             overview_data = {
                 '参数': ['导管总长度 (mm)', '当前轴向位置 (mm)', 'EA 修正系数',
-                         'Kp 修正系数', '粘接系数 η', '三点弯曲跨距 (mm)'],
-                '值': [L_total, x_pos, ea_correction, kp_correction, eta_bond, L_span]
+                         'Kp 修正系数', '粘接系数 η', '三点弯曲跨距 (mm)', '软化系数 c'],
+                '值': [L_total, x_pos, ea_correction, kp_correction, eta_bond, L_span, softening_c]
             }
             pd.DataFrame(overview_data).to_excel(writer, sheet_name='概览', index=False)
 
-            # Sheet 2: 当前截面刚度/强度
             if layers:
                 cur_metrics = {
                     '指标': ['EA (N)', 'EI (N·mm²)', 'Kp (N/mm)', 'Fu (N)', 'My (N·mm)', 'Fc (N)'],
@@ -1282,16 +1373,24 @@ with exp_col3:
                 }
                 pd.DataFrame(cur_metrics).to_excel(writer, sheet_name='当前截面指标', index=False)
 
-            # Sheet 3: 当前截面参数表
+                # 力-位移曲线数据（含线性和非线性）
+                dD_export = np.linspace(0, 2.0, 200)
+                F_lin_export = Kp * dD_export
+                F_nl_export = compute_crush_force_nonlinear(Kp, D_outer, dD_export, softening_c)
+                fd_df = pd.DataFrame({
+                    'DeltaD_mm': dD_export,
+                    'F_linear_N': F_lin_export,
+                    'F_nonlinear_N': F_nl_export
+                })
+                fd_df.to_excel(writer, sheet_name='力-位移曲线', index=False)
+
             if not param_df.empty:
                 param_df.to_excel(writer, sheet_name='当前截面参数', index=False)
 
-            # Sheet 4: 沿长度曲线
             curve_df.to_excel(writer, sheet_name='沿长度曲线', index=False)
 
-            # Sheet 5: 输入结构（原始数据）
             for i, layer in enumerate(structure):
-                sheet_name = f'层{i+1}_{layer["name"]}'[:31]  # Excel sheet 名最多 31 字符
+                sheet_name = f'层{i+1}_{layer["name"]}'[:31]
                 try:
                     layer['data'].to_excel(writer, sheet_name=sheet_name, index=False)
                 except Exception:
@@ -1308,4 +1407,4 @@ with exp_col3:
         st.button("📊 完整报告 (需 openpyxl)", disabled=True, key="dl_excel_disabled")
         st.caption("安装: pip install openpyxl")
 
-st.caption("CSV 用 UTF-8 with BOM 编码，Excel 打开不会乱码。Excel 报告包含概览、当前指标、截面参数、沿长度曲线、各层原始数据。")
+st.caption("CSV 用 UTF-8 with BOM 编码，Excel 打开不会乱码。")
