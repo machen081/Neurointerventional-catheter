@@ -218,7 +218,7 @@ def check_parameters(structure, L_total, span_L):
     return errors, warnings
 
 # ==================== 会话状态 ====================
-CURRENT_VERSION = "v32_improvements"
+CURRENT_VERSION = "v33_p0_p1_fixes"
 
 if 'structure_version' not in st.session_state or st.session_state.structure_version != CURRENT_VERSION:
     st.session_state.structure = create_default_structure()
@@ -530,35 +530,37 @@ def compute_axial_strength(layers):
     return sum(Fu_layer), Fu_layer
 
 def compute_axial_yield(layers, ea_corr=1.0):
-    """轴向起始屈服分析（新）"""
+    """轴向起始屈服分析（修：σ≤0 或 E≤0 的层不参与强度分配）"""
     if not layers:
         return 0.0, None, [], []
 
-    # 理论总 EA
-    EA_theory = 0.0
-    A_list = []
+    # 只让"有强度"的层参与强度分析
+    valid_indices = [i for i, l in enumerate(layers)
+                     if l.get('sigma_uts', 0.0) > 0 and l['E_z'] > 0]
+    if not valid_indices:
+        return 0.0, None, [], []
+
+    A_list, EA_list = [], []
     for l in layers:
         A_i = np.pi * (l['r_out']**2 - l['r_in']**2)
         A_list.append(A_i)
-        EA_theory += l['E_z'] * A_i
+        EA_list.append(l['E_z'] * A_i)
 
+    # 理论总 EA 只统计有效层（跳过 σ≤0 的层）
+    EA_theory = sum(EA_list[i] for i in valid_indices)
     if EA_theory <= 0:
         return 0.0, None, [], []
 
-    # 各层屈服应变
+    # 各层屈服应变（只对有效层）
     candidates = []
-    for i, l in enumerate(layers):
+    for i in valid_indices:
+        l = layers[i]
         E_z = l['E_z']
         sigma_uts = l.get('sigma_uts', 0.0)
-        if E_z > 0 and sigma_uts > 0:
-            eps_y = sigma_uts / E_z
-            candidates.append({
-                'layer': l['name'], 'eps_y': eps_y,
-                'E_z': E_z, 'sigma_uts': sigma_uts
-            })
-
-    if not candidates:
-        return 0.0, None, [], []
+        candidates.append({
+            'layer': l['name'], 'eps_y': sigma_uts / E_z,
+            'E_z': E_z, 'sigma_uts': sigma_uts
+        })
 
     candidates.sort(key=lambda c: c['eps_y'])
     eps_y_min = candidates[0]['eps_y']
@@ -567,13 +569,17 @@ def compute_axial_yield(layers, ea_corr=1.0):
     # 整体起始屈服拉力（乘 ea_corr，反映实际刚度偏低）
     Fu_y = EA_theory * ea_corr * eps_y_min
 
-    # 各层实际承担拉力（按刚度比例分配，乘 ea_corr 保证和值 = Fu_y）
+    # 各层实际承担拉力：无效层置 0
     contributions = []
     for i, l in enumerate(layers):
-        A_i = A_list[i]
-        EI_contrib = l['E_z'] * A_i
-        F_i = EI_contrib * ea_corr * eps_y_min
-        pct = EI_contrib / EA_theory * 100 if EA_theory > 0 else 0
+        is_valid = (i in valid_indices)
+        if is_valid:
+            EA_contrib = EA_list[i]
+            F_i = EA_contrib * ea_corr * eps_y_min
+            pct = EA_contrib / EA_theory * 100 if EA_theory > 0 else 0
+        else:
+            F_i = 0.0
+            pct = 0.0
         contributions.append({
             'layer': l['name'],
             'E_z': l['E_z'],
@@ -581,7 +587,8 @@ def compute_axial_yield(layers, ea_corr=1.0):
             'eps_y': l.get('sigma_uts', 0.0) / l['E_z'] if l['E_z'] > 0 else 0,
             'F_i': F_i,
             'pct': pct,
-            'is_ctrl': (l['name'] == ctrl_layer)
+            'is_ctrl': (l['name'] == ctrl_layer),
+            'is_valid': is_valid,
         })
 
     return Fu_y, ctrl_layer, candidates, contributions
@@ -590,31 +597,33 @@ def compute_bending_yield(layers):
     if not layers:
         return 0.0, None, [], []
 
+    valid_indices = [i for i, l in enumerate(layers)
+                     if l.get('sigma_uts', 0.0) > 0
+                     and l['E_z'] > 0 and l['r_out'] > 0]
+    if not valid_indices:
+        return 0.0, None, [], []
+
     EI_list = []
     for l in layers:
         I_i = (np.pi / 4) * (l['r_out']**4 - l['r_in']**4)
-        EI_i = l['E_z'] * I_i
-        EI_list.append(EI_i)
-    EI_total = sum(EI_list)
+        EI_list.append(l['E_z'] * I_i)
 
+    # 总 EI 只统计有效层
+    EI_total = sum(EI_list[i] for i in valid_indices)
     if EI_total <= 0:
         return 0.0, None, [], []
 
     candidates = []
-    for i, l in enumerate(layers):
-        E_i = l['E_z']
-        r_out = l['r_out']
+    for i in valid_indices:
+        l = layers[i]
+        E_i = l['E_z']; r_out = l['r_out']
         sigma_uts = l.get('sigma_uts', 0.0)
-        if E_i > 0 and r_out > 0 and sigma_uts > 0:
-            M_i = sigma_uts * EI_total / (E_i * r_out)
-            candidates.append({
-                'layer': l['name'], 'M_y': M_i, 'E_z': E_i,
-                'r_out': r_out, 'sigma_uts': sigma_uts,
-                'EI_i': EI_list[i]
-            })
-
-    if not candidates:
-        return 0.0, None, [], []
+        M_i = sigma_uts * EI_total / (E_i * r_out)
+        candidates.append({
+            'layer': l['name'], 'M_y': M_i, 'E_z': E_i,
+            'r_out': r_out, 'sigma_uts': sigma_uts,
+            'EI_i': EI_list[i]
+        })
 
     candidates.sort(key=lambda c: c['M_y'])
     M_y = candidates[0]['M_y']
@@ -622,8 +631,9 @@ def compute_bending_yield(layers):
 
     contributions = []
     for i, l in enumerate(layers):
+        is_valid = (i in valid_indices)
         EI_i = EI_list[i]
-        if EI_total > 0:
+        if is_valid:
             M_actual = EI_i * M_y / EI_total
             pct = EI_i / EI_total * 100
         else:
@@ -634,7 +644,8 @@ def compute_bending_yield(layers):
             'EI_i': EI_i,
             'M_actual': M_actual,
             'pct': pct,
-            'is_ctrl': (l['name'] == ctrl_layer)
+            'is_ctrl': (l['name'] == ctrl_layer),
+            'is_valid': is_valid,
         })
 
     return M_y, ctrl_layer, candidates, contributions
@@ -643,12 +654,20 @@ def compute_collapse_force(layers):
     if not layers:
         return 0.0, None, [], []
 
+    valid_indices = [i for i, l in enumerate(layers)
+                     if l.get('sigma_uts', 0.0) > 0
+                     and l['E_theta'] > 0
+                     and (l['r_out'] - l['r_in']) > 0]
+    if not valid_indices:
+        return 0.0, None, [], []
+
     EI_theta_list = []
     for l in layers:
-        EI_theta_i = compute_wall_bending_stiffness(l['E_theta'], l['r_in'], l['r_out'])
-        EI_theta_list.append(EI_theta_i)
-    EI_theta_total = sum(EI_theta_list)
-
+        EI_theta_list.append(
+            compute_wall_bending_stiffness(l['E_theta'], l['r_in'], l['r_out'])
+        )
+    # 总环向弯曲刚度只统计有效层
+    EI_theta_total = sum(EI_theta_list[i] for i in valid_indices)
     if EI_theta_total <= 0:
         return 0.0, None, [], []
 
@@ -658,20 +677,16 @@ def compute_collapse_force(layers):
     C = 0.318
 
     candidates = []
-    for i, l in enumerate(layers):
-        E_theta = l['E_theta']
-        t_i = l['r_out'] - l['r_in']
+    for i in valid_indices:
+        l = layers[i]
+        E_theta = l['E_theta']; t_i = l['r_out'] - l['r_in']
         sigma_uts = l.get('sigma_uts', 0.0)
-        if E_theta > 0 and t_i > 0 and R > 0 and sigma_uts > 0:
-            F_i = sigma_uts * EI_theta_total * 2 / (E_theta * C * R * t_i)
-            candidates.append({
-                'layer': l['name'], 'F_c': F_i, 'E_theta': E_theta,
-                't': t_i, 'sigma_uts': sigma_uts,
-                'EI_theta_i': EI_theta_list[i]
-            })
-
-    if not candidates:
-        return 0.0, None, [], []
+        F_i = sigma_uts * EI_theta_total * 2 / (E_theta * C * R * t_i)
+        candidates.append({
+            'layer': l['name'], 'F_c': F_i, 'E_theta': E_theta,
+            't': t_i, 'sigma_uts': sigma_uts,
+            'EI_theta_i': EI_theta_list[i]
+        })
 
     candidates.sort(key=lambda c: c['F_c'])
     F_c = candidates[0]['F_c']
@@ -680,8 +695,9 @@ def compute_collapse_force(layers):
     M_max = C * F_c * R
     contributions = []
     for i, l in enumerate(layers):
+        is_valid = (i in valid_indices)
         EI_theta_i = EI_theta_list[i]
-        if EI_theta_total > 0:
+        if is_valid:
             M_actual = EI_theta_i * M_max / EI_theta_total
             pct = EI_theta_i / EI_theta_total * 100
         else:
@@ -692,7 +708,8 @@ def compute_collapse_force(layers):
             'EI_theta_i': EI_theta_i,
             'M_actual': M_actual,
             'pct': pct,
-            'is_ctrl': (l['name'] == ctrl_layer)
+            'is_ctrl': (l['name'] == ctrl_layer),
+            'is_valid': is_valid,
         })
 
     return F_c, ctrl_layer, candidates, contributions
@@ -840,11 +857,12 @@ with st.sidebar:
 
             st.caption(LAYER_TYPES[layer['type']]['caption'])
 
+            # P1 修复：key 带上层类型，切换类型时自动重建编辑器状态
             edited = st.data_editor(
                 layer['data'],
                 num_rows="dynamic",
                 use_container_width=True,
-                key=f"data_{i}_v32"
+                key=f"data_{i}_{layer['type']}_v33"
             )
             if edited is not None and not edited.empty:
                 layer['data'] = edited.copy()
@@ -1090,11 +1108,11 @@ with st.expander("6. 强度分析", expanded=False):
 | 弯曲屈服 | My | 有 |
 | 压扁屈服 | Fc | 有 |
 
-**拉伸起始屈服**：各层屈服应变 ε_y = σ_uts/E_z 最小的层控制。候选值、控制层、实际分配三张视图。
+**拉伸起始屈服**：各层屈服应变 ε_y = σ_uts/E_z 最小的层控制。σ_uts ≤ 0 的层不参与强度分析（在贡献表中标"— (σ≤0 跳过)"）。
 
-**弯曲屈服**：控制层由 M_i = σ_uts,i · EI_total / (E_z,i · r_out,i) 决定，取最小。
+**弯曲屈服**：控制层由 M_i = σ_uts,i · EI_total / (E_z,i · r_out,i) 决定，取最小。σ_uts ≤ 0 的层不参与。
 
-**压扁屈服**：控制层由 ε_y = σ_uts/E_θ 决定，取最小。弹簧圈通常控制。
+**压扁屈服**：控制层由 ε_y = σ_uts/E_θ 决定，取最小。σ_uts ≤ 0 的层不参与。
 
 **轴向拉力**：另有整体极限 Fu，是各层贡献相加。
     """)
@@ -1632,40 +1650,54 @@ if layers:
     c3.metric("弯曲屈服力矩 My (N·mm)", f"{My:.4f}")
     c4.metric("压扁屈服力 Fc (N)", f"{Fc:.2f}")
 
-    st.info(f"**拉伸起始屈服控制层**：{ax_yield_ctrl}。"
-            f"**弯曲屈服控制层**：{bending_ctrl}。"
-            f"**压扁屈服控制层**：{collapse_ctrl}。")
+    ctrl_info = []
+    if ax_yield_ctrl is not None:
+        ctrl_info.append(f"**拉伸起始屈服控制层**：{ax_yield_ctrl}")
+    if bending_ctrl is not None:
+        ctrl_info.append(f"**弯曲屈服控制层**：{bending_ctrl}")
+    if collapse_ctrl is not None:
+        ctrl_info.append(f"**压扁屈服控制层**：{collapse_ctrl}")
+    if ctrl_info:
+        st.info("。".join(ctrl_info) + "。")
+    else:
+        st.warning("没有层满足强度分析条件（需 σ_uts > 0 且 E > 0）。")
 
     # 拉伸起始屈服 — 各层贡献表
     st.subheader("拉伸起始屈服 — 各层贡献")
     st.caption(
         "拉伸起始屈服指第一层表面达到抗拉强度时的整体拉力。"
+        "σ_uts ≤ 0 的层不参与强度分析（在表中标注）。"
         "\"该层屈服时整体拉力\"用于找控制层（取最小值）；"
         "\"整体屈服时该层承担拉力\"是实际分配，相加等于 Fu_y。"
     )
 
-    ax_ctrl_dict = {c['layer']: c for c in ax_yield_cands}
     ax_rows = []
     for contrib in ax_yield_contribs:
-        layer_name = contrib['layer']
+        is_valid = contrib.get('is_valid', True)
+        if is_valid:
+            col_yield_force = f"{Fu_y:.4f}"
+            col_flag = "★" if contrib['is_ctrl'] else ""
+        else:
+            col_yield_force = "—"
+            col_flag = "— (σ≤0 跳过)"
         ax_rows.append({
-            "层": layer_name,
+            "层": contrib['layer'],
             "轴向模量 (MPa)": f"{contrib['E_z']:.1f}",
             "抗拉强度 (MPa)": f"{contrib['sigma_uts']:.1f}",
-            "屈服应变 ε_y = σ/E": f"{contrib['eps_y']*100:.2f}%" if contrib['E_z'] > 0 else "—",
-            "该层屈服时整体拉力 (N)": f"{Fu_y:.4f}",
+            "屈服应变 ε_y = σ/E": f"{contrib['eps_y']*100:.2f}%" if contrib['E_z'] > 0 and contrib['sigma_uts'] > 0 else "—",
+            "该层屈服时整体拉力 (N)": col_yield_force,
             "整体屈服时该层承担拉力 (N)": f"{contrib['F_i']:.4f}",
             "占比 (%)": f"{contrib['pct']:.2f}%",
-            "是否控制层": "★" if contrib['is_ctrl'] else ""
+            "是否控制层": col_flag
         })
     st.dataframe(pd.DataFrame(ax_rows), use_container_width=True)
-    st.caption("注：\"该层屈服时整体拉力\"在拉伸模式下对所有层都是同一个值 Fu_y（因为整体应变相同，"
+    st.caption("注：\"该层屈服时整体拉力\"在拉伸模式下对所有有效层都是同一个值 Fu_y（因为整体应变相同，"
                "控制层最先屈服）。控制层通过比较各层屈服应变 ε_y 确定，ε_y 最小者先屈服。")
 
     # 弯曲屈服 — 各层贡献表
     st.subheader("弯曲屈服 — 各层贡献")
     st.caption(
-        "整体弯曲屈服力矩取所有层候选值的最小值。"
+        "整体弯曲屈服力矩取所有有效层候选值的最小值。σ_uts ≤ 0 的层不参与强度分析（在表中标注）。"
         "\"该层屈服时整体弯矩\"用于找控制层；"
         "\"整体屈服时该层承担弯矩\"是实际分配，相加等于整体弯矩。"
     )
@@ -1675,23 +1707,32 @@ if layers:
     for contrib in bending_contribs:
         layer_name = contrib['layer']
         cand = b_ctrl_dict.get(layer_name, {})
+        is_valid = contrib.get('is_valid', True)
+        if is_valid:
+            col_M_yield = f"{cand.get('M_y', 0):.4f}"
+            col_flag = "★" if contrib['is_ctrl'] else ""
+            col_Fy_3p = f"{4 * cand.get('M_y', 0) / L_span:.4f}" if L_span > 0 else "—"
+        else:
+            col_M_yield = "—"
+            col_flag = "— (σ≤0 跳过)"
+            col_Fy_3p = "—"
         b_rows.append({
             "层": layer_name,
-            "轴向模量 (MPa)": f"{cand.get('E_z', 0):.1f}",
-            "外半径 (mm)": f"{cand.get('r_out', 0):.4f}",
+            "轴向模量 (MPa)": f"{cand.get('E_z', 0):.1f}" if cand else "—",
+            "外半径 (mm)": f"{cand.get('r_out', 0):.4f}" if cand else "—",
             "抗拉强度 (MPa)": f"{cand.get('sigma_uts', 0):.1f}",
-            "该层屈服时整体弯矩 (N·mm)": f"{cand.get('M_y', 0):.4f}",
+            "该层屈服时整体弯矩 (N·mm)": col_M_yield,
             "整体屈服时该层承担弯矩 (N·mm)": f"{contrib['M_actual']:.4f}",
             "占比 (%)": f"{contrib['pct']:.2f}%",
-            "是否控制层": "★" if contrib['is_ctrl'] else "",
-            f"三点弯曲力 (N, L={L_span:.0f}mm)": f"{4 * cand.get('M_y', 0) / L_span:.4f}" if L_span > 0 else "—"
+            "是否控制层": col_flag,
+            f"三点弯曲力 (N, L={L_span:.0f}mm)": col_Fy_3p
         })
     st.dataframe(pd.DataFrame(b_rows), use_container_width=True)
 
     # 压扁屈服 — 各层贡献表
     st.subheader("压扁屈服 — 各层贡献")
     st.caption(
-        "整体压扁屈服力取所有层候选值的最小值。"
+        "整体压扁屈服力取所有有效层候选值的最小值。σ_uts ≤ 0 的层不参与强度分析（在表中标注）。"
         "\"该层屈服时整体受力\"用于找控制层；"
         "\"整体屈服时该层承担弯矩\"是实际分配。"
     )
@@ -1701,16 +1742,27 @@ if layers:
     for contrib in collapse_contribs:
         layer_name = contrib['layer']
         cand = c_ctrl_dict.get(layer_name, {})
+        is_valid = contrib.get('is_valid', True)
+        if is_valid:
+            col_F_yield = f"{cand.get('F_c', 0):.4f}"
+            col_flag = "★" if contrib['is_ctrl'] else ""
+            E_theta_v = cand.get('E_theta', 0)
+            sigma_v = cand.get('sigma_uts', 0)
+            col_eps_y = f"{sigma_v / E_theta_v * 100:.2f}%" if E_theta_v > 0 and sigma_v > 0 else "—"
+        else:
+            col_F_yield = "—"
+            col_flag = "— (σ≤0 跳过)"
+            col_eps_y = "—"
         c_rows.append({
             "层": layer_name,
-            "环向模量 (MPa)": f"{cand.get('E_theta', 0):.1f}",
-            "壁厚 (mm)": f"{cand.get('t', 0):.4f}",
+            "环向模量 (MPa)": f"{cand.get('E_theta', 0):.1f}" if cand else "—",
+            "壁厚 (mm)": f"{cand.get('t', 0):.4f}" if cand else "—",
             "抗拉强度 (MPa)": f"{cand.get('sigma_uts', 0):.1f}",
-            "屈服应变 ε_y = σ/E": f"{cand.get('sigma_uts', 0) / cand.get('E_theta', 1) * 100:.2f}%" if cand.get('E_theta', 0) > 0 else "—",
-            "该层屈服时整体受力 (N)": f"{cand.get('F_c', 0):.4f}",
+            "屈服应变 ε_y = σ/E": col_eps_y,
+            "该层屈服时整体受力 (N)": col_F_yield,
             "整体屈服时该层承担弯矩 (N·mm)": f"{contrib['M_actual']:.4f}",
             "占比 (%)": f"{contrib['pct']:.2f}%",
-            "是否控制层": "★" if contrib['is_ctrl'] else ""
+            "是否控制层": col_flag
         })
     st.dataframe(pd.DataFrame(c_rows), use_container_width=True)
 
@@ -1874,15 +1926,16 @@ with exp_col3:
                 # 拉伸起始屈服各层贡献
                 ax_export_rows = []
                 for contrib in ax_yield_contribs:
+                    is_valid = contrib.get('is_valid', True)
                     ax_export_rows.append({
                         "层": contrib['layer'],
                         "轴向模量_MPa": contrib['E_z'],
                         "抗拉强度_MPa": contrib['sigma_uts'],
-                        "屈服应变_εy": contrib['eps_y'],
-                        "整体屈服拉力_N": Fu_y,
+                        "屈服应变_εy": contrib['eps_y'] if is_valid else None,
+                        "整体屈服拉力_N": Fu_y if is_valid else None,
                         "该层承担拉力_N": contrib['F_i'],
                         "占比_%": contrib['pct'],
-                        "是否控制层": "★" if contrib['is_ctrl'] else ""
+                        "是否控制层": "★" if contrib['is_ctrl'] else ("— (σ≤0 跳过)" if not is_valid else "")
                     })
                 pd.DataFrame(ax_export_rows).to_excel(
                     writer, sheet_name='拉伸起始屈服各层贡献', index=False)
@@ -1892,15 +1945,16 @@ with exp_col3:
                 for contrib in bending_contribs:
                     layer_name = contrib['layer']
                     cand = b_ctrl_dict.get(layer_name, {})
+                    is_valid = contrib.get('is_valid', True)
                     bend_export_rows.append({
                         "层": layer_name,
-                        "轴向模量_MPa": cand.get('E_z', 0),
-                        "外半径_mm": cand.get('r_out', 0),
+                        "轴向模量_MPa": cand.get('E_z', None) if is_valid else None,
+                        "外半径_mm": cand.get('r_out', None) if is_valid else None,
                         "抗拉强度_MPa": cand.get('sigma_uts', 0),
-                        "该层屈服时整体弯矩_Nmm": cand.get('M_y', 0),
+                        "该层屈服时整体弯矩_Nmm": cand.get('M_y', None) if is_valid else None,
                         "整体屈服时该层承担弯矩_Nmm": contrib['M_actual'],
                         "占比_%": contrib['pct'],
-                        "是否控制层": "★" if contrib['is_ctrl'] else ""
+                        "是否控制层": "★" if contrib['is_ctrl'] else ("— (σ≤0 跳过)" if not is_valid else "")
                     })
                 pd.DataFrame(bend_export_rows).to_excel(
                     writer, sheet_name='弯曲屈服各层贡献', index=False)
@@ -1910,18 +1964,19 @@ with exp_col3:
                 for contrib in collapse_contribs:
                     layer_name = contrib['layer']
                     cand = c_ctrl_dict.get(layer_name, {})
+                    is_valid = contrib.get('is_valid', True)
                     E_theta_v = cand.get('E_theta', 0)
                     sigma_v = cand.get('sigma_uts', 0)
                     coll_export_rows.append({
                         "层": layer_name,
-                        "环向模量_MPa": E_theta_v,
-                        "壁厚_mm": cand.get('t', 0),
+                        "环向模量_MPa": E_theta_v if is_valid else None,
+                        "壁厚_mm": cand.get('t', None) if is_valid else None,
                         "抗拉强度_MPa": sigma_v,
-                        "屈服应变_%": (sigma_v / E_theta_v * 100) if E_theta_v > 0 else 0,
-                        "该层屈服时整体受力_N": cand.get('F_c', 0),
+                        "屈服应变_%": (sigma_v / E_theta_v * 100) if (E_theta_v > 0 and is_valid) else None,
+                        "该层屈服时整体受力_N": cand.get('F_c', None) if is_valid else None,
                         "整体屈服时该层承担弯矩_Nmm": contrib['M_actual'],
                         "占比_%": contrib['pct'],
-                        "是否控制层": "★" if contrib['is_ctrl'] else ""
+                        "是否控制层": "★" if contrib['is_ctrl'] else ("— (σ≤0 跳过)" if not is_valid else "")
                     })
                 pd.DataFrame(coll_export_rows).to_excel(
                     writer, sheet_name='压扁屈服各层贡献', index=False)
