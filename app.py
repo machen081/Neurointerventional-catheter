@@ -125,7 +125,7 @@ def normalize_structure(structure):
     return structure
 
 # ==================== 会话状态 ====================
-CURRENT_VERSION = "v27_manual_split"
+CURRENT_VERSION = "v29_cn_tables_en_plots"
 
 if 'structure_version' not in st.session_state or st.session_state.structure_version != CURRENT_VERSION:
     st.session_state.structure = create_default_structure()
@@ -636,7 +636,7 @@ with st.sidebar:
                 layer['data'],
                 num_rows="dynamic",
                 use_container_width=True,
-                key=f"data_{i}_v27"
+                key=f"data_{i}_v29"
             )
             if edited is not None and not edited.empty:
                 layer['data'] = edited.copy()
@@ -951,8 +951,8 @@ with st.expander("6. 强度分析", expanded=False):
 
 弹簧圈/编织层的 Fu 由两部分组成：
 
-- **Fu_fiber**：丝材/弹簧贡献
-- **Fu_matrix**：热熔填充贡献（含粘接系数 η 折减）
+- **丝材/弹簧贡献**：丝材或弹簧本身的贡献
+- **热熔填充贡献**：热熔材料填充空隙后的贡献（含粘接系数 η 折减）
 
 弹簧圈层的热熔填充贡献往往大于弹簧丝本身。
     """)
@@ -1401,7 +1401,7 @@ def make_label(sch):
 # ============================================================
 # 第一部分：刚度分析
 # ============================================================
-st.markdown("## 一、Stiffness Analysis（刚度分析）")
+st.markdown("## 一、刚度分析")
 st.caption("刚度描述导管抵抗变形的能力。单位：EA (N)、EI (N·mm²)、Kp (N/mm)。")
 
 if not layers:
@@ -1410,11 +1410,11 @@ else:
     EA, EI, Kp, EA_c, EI_c, Kp_c, model_used, thick_ratio = compute_stiffness(layers, ea_correction, kp_correction)
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("Axial Stiffness EA (N)", f"{EA:.2f}")
-    c2.metric("Bending Stiffness EI (N·mm²)", f"{EI:.2f}")
-    c3.metric("Crush Stiffness Kp (N/mm)", f"{Kp:.2f}")
+    c1.metric("轴向刚度 EA (N)", f"{EA:.2f}")
+    c2.metric("弯曲刚度 EI (N·mm²)", f"{EI:.2f}")
+    c3.metric("抗压扁刚度 Kp (N/mm)", f"{Kp:.2f}")
 
-    st.subheader("Stiffness along Length")
+    st.subheader("刚度沿长度分布")
     if len(all_schemes) > 1:
         st.caption(f"当前方案 + {len(all_schemes)-1} 个已保存方案叠加显示。")
     fig_s, axes_s = plt.subplots(3, 1, figsize=(10, 12))
@@ -1430,21 +1430,21 @@ else:
         axes_s[1].plot(sch['xs'], sch['EI'], color=color, linewidth=lw, linestyle=ls, label=label_s)
         axes_s[2].plot(sch['xs'], sch['Kp'], color=color, linewidth=lw, linestyle=ls, label=label_s)
 
-    axes_s[0].set_ylabel('EA (N)')
+    axes_s[0].set_ylabel('Axial Stiffness EA (N)')
     axes_s[0].set_xlabel('Axial position (mm)')
     axes_s[0].set_title('Axial Stiffness')
     axes_s[0].grid(True); axes_s[0].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
     axes_s[0].legend(loc='best', fontsize=8)
 
-    axes_s[1].set_ylabel('EI (N·mm²)')
+    axes_s[1].set_ylabel('Bending Stiffness EI (N·mm²)')
     axes_s[1].set_xlabel('Axial position (mm)')
     axes_s[1].set_title('Bending Stiffness')
     axes_s[1].grid(True); axes_s[1].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
     axes_s[1].legend(loc='best', fontsize=8)
 
-    axes_s[2].set_ylabel('Kp (N/mm)')
+    axes_s[2].set_ylabel('Crush Stiffness Kp (N/mm)')
     axes_s[2].set_xlabel('Axial position (mm)')
-    axes_s[2].set_title(f'Crush Stiffness (current correction × {kp_correction:.3f})')
+    axes_s[2].set_title(f'Crush Stiffness (correction × {kp_correction:.3f})')
     axes_s[2].grid(True); axes_s[2].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
     axes_s[2].legend(loc='best', fontsize=8)
 
@@ -1452,11 +1452,10 @@ else:
     st.pyplot(fig_s)
 
     # 非线性力-位移曲线
-    st.subheader("Crush Force–Displacement Curve (Non-linear)")
+    st.subheader("抗压扁力-位移曲线（非线性）")
     st.caption(
-        f"Current section Kp = {Kp:.3f} N/mm (with correction factor {kp_correction:.3f}). "
-        f"Softening coefficient c = {softening_c:.2f}. "
-        f"Non-linear model: F = Kp·ΔD / (1 + c·ΔD/D)."
+        f"当前截面 Kp = {Kp:.3f} N/mm（已应用修正系数 {kp_correction:.3f}）。"
+        f"软化系数 c = {softening_c:.2f}。"
     )
 
     r_outer_max = max(l['r_out'] for l in layers)
@@ -1489,7 +1488,7 @@ else:
         except Exception:
             pass
 
-    label_lin = f"Current: Linear (Kp={Kp:.2f} N/mm)"
+    label_lin = f"Current: Linear extrapolation (Kp={Kp:.2f} N/mm)"
     label_nl = f"Current: Non-linear (Kp={Kp:.2f} N/mm, c={softening_c:.2f})"
     ax_cd.plot(dD_range, F_linear, '--', color='gray', linewidth=1.8, label=label_lin)
     ax_cd.plot(dD_range, F_nonlinear, 'r-', linewidth=2.5, label=label_nl)
@@ -1551,17 +1550,17 @@ else:
         delta_pct = (F_lin - F_nl) / F_lin * 100 if F_lin > 0 else 0
         table_rows.append({
             'ΔD (mm)': f"{dD_v:.1f}",
-            'ΔD / Outer D': f"{dD_v / D_outer * 100:.1f}%" if D_outer > 0 else "—",
-            'Linear F (N)': f"{F_lin:.4f}",
-            'Non-linear F (N)': f"{F_nl:.4f}",
-            'Softening': f"-{delta_pct:.1f}%"
+            'ΔD / 外径': f"{dD_v / D_outer * 100:.1f}%" if D_outer > 0 else "—",
+            '线性 F (N)': f"{F_lin:.4f}",
+            '非线性 F (N)': f"{F_nl:.4f}",
+            '软化幅度': f"-{delta_pct:.1f}%"
         })
     st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
 
     if len(all_schemes) > 1:
         st.markdown("---")
         st.subheader("📊 方案对比（当前截面）")
-        st.caption(f"x = {x_pos:.1f} mm 处所有方案的六项指标对比，含关键参数")
+        st.caption(f"x = {x_pos:.1f} mm 处所有方案的六项指标对比")
 
         compare_rows = []
         for sch in all_schemes:
@@ -1578,18 +1577,18 @@ else:
                     s_Fu_x, _ = compute_axial_strength(s_layers_cmp)
                     s_My_x, _, _ = compute_bending_yield(s_layers_cmp)
                     s_Fc_x, _, _ = compute_collapse_force(s_layers_cmp)
-                    scheme_label = sch['name'] + (' (current)' if sch['is_current'] else '')
+                    scheme_label = sch['name'] + (' (当前)' if sch['is_current'] else '')
                     compare_rows.append({
-                        'Scheme': scheme_label,
-                        'Kp_corr': f"{p['kp_correction']:.2f}",
-                        'c': f"{p['softening_c']:.2f}",
-                        'η': f"{p['eta_bond']:.2f}",
-                        'EA (N)': f"{s_EA_x:.2f}",
-                        'EI (N·mm²)': f"{s_EI_x:.2f}",
-                        'Kp (N/mm)': f"{s_Kp_x:.2f}",
-                        'Fu (N)': f"{s_Fu_x:.2f}",
-                        'My (N·mm)': f"{s_My_x:.4f}",
-                        'Fc (N)': f"{s_Fc_x:.2f}"
+                        '方案': scheme_label,
+                        'Kp 修正': f"{p['kp_correction']:.2f}",
+                        '软化系数 c': f"{p['softening_c']:.2f}",
+                        '粘接系数 η': f"{p['eta_bond']:.2f}",
+                        '轴向刚度 EA (N)': f"{s_EA_x:.2f}",
+                        '弯曲刚度 EI (N·mm²)': f"{s_EI_x:.2f}",
+                        '抗压扁刚度 Kp (N/mm)': f"{s_Kp_x:.2f}",
+                        '轴向拉力 Fu (N)': f"{s_Fu_x:.2f}",
+                        '弯曲屈服力矩 My (N·mm)': f"{s_My_x:.4f}",
+                        '压扁屈服力 Fc (N)': f"{s_Fc_x:.2f}"
                     })
             except Exception:
                 pass
@@ -1601,7 +1600,7 @@ else:
         f"标定方法见说明书第 9 节。"
     )
 
-    st.subheader("Cross-section View")
+    st.subheader("截面图")
     fig_c, ax_c = plt.subplots(figsize=(5, 5))
     colors = plt.cm.tab10(np.linspace(0, 1, max(len(layers), 1)))
     for i, l in enumerate(layers):
@@ -1625,7 +1624,7 @@ else:
     ax_c.set_aspect('equal'); ax_c.axis('off')
     st.pyplot(fig_c)
 
-    st.subheader("Layer Contributions to Stiffness")
+    st.subheader("各层刚度贡献")
     labels = [l['name'] for l in layers]
     ea_pct = [v/EA*100 if EA > 0 else 0 for v in EA_c]
     ei_pct = [v/EI*100 if EI > 0 else 0 for v in EI_c]
@@ -1667,7 +1666,7 @@ else:
 # 第二部分：强度分析
 # ============================================================
 st.markdown("---")
-st.markdown("## 二、Strength Analysis（强度分析）")
+st.markdown("## 二、强度分析")
 st.caption(f"强度描述导管能承受的极限载荷。弯曲按三点弯曲换算，跨距 L = {L_span:.1f} mm。粘接系数 η = {eta_bond:.2f}。")
 
 if layers:
@@ -1678,15 +1677,15 @@ if layers:
     Fy_bending = 4 * My / L_span if L_span > 0 else 0.0
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Axial Tensile Force Fu (N)", f"{Fu:.2f}")
-    c2.metric("Bending Yield Moment My (N·mm)", f"{My:.4f}")
-    c3.metric("Bending Yield Force (3-pt) (N)", f"{Fy_bending:.4f}",
+    c1.metric("轴向拉力 Fu (N)", f"{Fu:.2f}")
+    c2.metric("弯曲屈服力矩 My (N·mm)", f"{My:.4f}")
+    c3.metric("三点弯曲屈服力 (N)", f"{Fy_bending:.4f}",
               help=f"三点弯曲跨距 L = {L_span:.1f} mm")
-    c4.metric("Collapse Force Fc (N)", f"{Fc:.2f}")
+    c4.metric("压扁屈服力 Fc (N)", f"{Fc:.2f}")
 
     st.info(f"**弯曲屈服控制层**：{bending_ctrl}。**压扁屈服控制层**：{collapse_ctrl}。")
 
-    st.subheader("Strength along Length")
+    st.subheader("强度沿长度分布")
     if len(all_schemes) > 1:
         st.caption(f"当前方案 + {len(all_schemes)-1} 个已保存方案叠加显示。")
     fig_t, axes_t = plt.subplots(3, 1, figsize=(10, 12))
@@ -1702,19 +1701,19 @@ if layers:
         axes_t[1].plot(sch['xs'], sch['My'], color=color, linewidth=lw, linestyle=ls, label=label_s)
         axes_t[2].plot(sch['xs'], sch['Fc'], color=color, linewidth=lw, linestyle=ls, label=label_s)
 
-    axes_t[0].set_ylabel('Fu (N)')
+    axes_t[0].set_ylabel('Axial Tensile Force Fu (N)')
     axes_t[0].set_xlabel('Axial position (mm)')
     axes_t[0].set_title('Max Axial Tensile Force')
     axes_t[0].grid(True); axes_t[0].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
     axes_t[0].legend(loc='best', fontsize=8)
 
-    axes_t[1].set_ylabel('My (N·mm)')
+    axes_t[1].set_ylabel('Bending Yield Moment My (N·mm)')
     axes_t[1].set_xlabel('Axial position (mm)')
     axes_t[1].set_title('Bending Yield Moment')
     axes_t[1].grid(True); axes_t[1].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
     axes_t[1].legend(loc='best', fontsize=8)
 
-    axes_t[2].set_ylabel('Fc (N)')
+    axes_t[2].set_ylabel('Collapse Force Fc (N)')
     axes_t[2].set_xlabel('Axial position (mm)')
     axes_t[2].set_title('Collapse Force (weakest layer controls)')
     axes_t[2].grid(True); axes_t[2].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
@@ -1723,53 +1722,53 @@ if layers:
     fig_t.tight_layout(rect=[0, 0, 1, 0.96])
     st.pyplot(fig_t)
 
-    st.subheader("Bending Yield — Candidate Layers")
+    st.subheader("弯曲屈服 — 候选层")
     b_rows = []
     for c in bending_cands:
         M_i = c['M_y']
         F_i = 4 * M_i / L_span if L_span > 0 else 0.0
         b_rows.append({
-            "Layer": c['layer'],
-            "E_z (MPa)": f"{c['E_z']:.1f}",
-            "r_out (mm)": f"{c['r_out']:.4f}",
-            "σ_uts (MPa)": f"{c['sigma_uts']:.1f}",
-            "M_y (N·mm)": f"{M_i:.4f}",
-            f"Fy (N, L={L_span:.0f}mm)": f"{F_i:.4f}"
+            "层": c['layer'],
+            "轴向模量 (MPa)": f"{c['E_z']:.1f}",
+            "外半径 (mm)": f"{c['r_out']:.4f}",
+            "抗拉强度 (MPa)": f"{c['sigma_uts']:.1f}",
+            "屈服弯矩 (N·mm)": f"{M_i:.4f}",
+            f"三点弯曲力 (N, L={L_span:.0f}mm)": f"{F_i:.4f}"
         })
     st.dataframe(pd.DataFrame(b_rows), use_container_width=True)
 
-    st.subheader("Collapse — Candidate Layers")
+    st.subheader("压扁屈服 — 候选层")
     c_rows = []
     for c in collapse_cands:
         c_rows.append({
-            "Layer": c['layer'],
-            "E_theta (MPa)": f"{c['E_theta']:.1f}",
-            "t (mm)": f"{c['t']:.4f}",
-            "σ_uts (MPa)": f"{c['sigma_uts']:.1f}",
-            "ε_y = σ/E": f"{c['sigma_uts']/c['E_theta']*100:.2f}%",
-            "F_c (N)": f"{c['F_c']:.4f}"
+            "层": c['layer'],
+            "环向模量 (MPa)": f"{c['E_theta']:.1f}",
+            "壁厚 (mm)": f"{c['t']:.4f}",
+            "抗拉强度 (MPa)": f"{c['sigma_uts']:.1f}",
+            "屈服应变 ε_y = σ/E": f"{c['sigma_uts']/c['E_theta']*100:.2f}%",
+            "屈服力 (N)": f"{c['F_c']:.4f}"
         })
     st.dataframe(pd.DataFrame(c_rows), use_container_width=True)
 
-    st.subheader("Axial Tensile — Layer Contributions")
+    st.subheader("轴向拉力 — 各层贡献")
     fu_rows = []
     for i, l in enumerate(layers):
         if l['type'] == '弹簧圈':
-            method = "Spring + matrix"
+            method = "弹簧公式 + 热熔填充"
         elif l['type'] == '编织层':
-            method = "Fiber + matrix"
+            method = "丝材 + 热熔填充"
         elif l.get('is_filler', False):
-            method = "Filler (σ·A)"
+            method = "填充层 (σ·A)"
         else:
             method = "σ·A"
         fu_rows.append({
-            "Layer": l['name'],
-            "Type": l['type'],
-            "Method": method,
-            "UTS (MPa)": f"{l['sigma_uts']:.1f}",
-            "Fu_fiber (N)": f"{l.get('Fu_fiber', 0.0):.4f}",
-            "Fu_matrix (N)": f"{l.get('Fu_matrix', 0.0):.4f}",
-            "Fu_total (N)": f"{Fu_layer[i]:.4f}"
+            "层": l['name'],
+            "类型": l['type'],
+            "计算方法": method,
+            "抗拉强度 (MPa)": f"{l['sigma_uts']:.1f}",
+            "丝材/弹簧贡献 (N)": f"{l.get('Fu_fiber', 0.0):.4f}",
+            "热熔填充贡献 (N)": f"{l.get('Fu_matrix', 0.0):.4f}",
+            "合计 (N)": f"{Fu_layer[i]:.4f}"
         })
     st.dataframe(pd.DataFrame(fu_rows), use_container_width=True)
 
@@ -1777,18 +1776,18 @@ if layers:
 # 参数明细表
 # ============================================================
 st.markdown("---")
-st.subheader("Layer Parameters at This Position")
+st.subheader("当前位置层参数")
 if layers:
     param_rows = []
     for l in layers:
         row = {
-            "Layer": l['name'], "Type": l['type'],
-            "r_in (mm)": f"{l['r_in']:.4f}", "r_out (mm)": f"{l['r_out']:.4f}",
-            "E_z (MPa)": f"{l['E_z']:.2f}", "E_theta (MPa)": f"{l['E_theta']:.2f}",
-            "UTS (MPa)": f"{l['sigma_uts']:.1f}"
+            "层": l['name'], "类型": l['type'],
+            "内半径 (mm)": f"{l['r_in']:.4f}", "外半径 (mm)": f"{l['r_out']:.4f}",
+            "轴向模量 (MPa)": f"{l['E_z']:.2f}", "环向模量 (MPa)": f"{l['E_theta']:.2f}",
+            "抗拉强度 (MPa)": f"{l['sigma_uts']:.1f}"
         }
-        row["V_f (%)"] = f"{l['V_f']*100:.2f}%" if l['V_f'] is not None else "—"
-        row["V_void (%)"] = f"{l['V_void']*100:.2f}%" if l['V_void'] is not None else "—"
+        row["丝材体积分数 (%)"] = f"{l['V_f']*100:.2f}%" if l['V_f'] is not None else "—"
+        row["空隙体积分数 (%)"] = f"{l['V_void']*100:.2f}%" if l['V_void'] is not None else "—"
         param_rows.append(row)
     param_df = pd.DataFrame(param_rows)
     st.dataframe(param_df, use_container_width=True)
@@ -1887,16 +1886,16 @@ with exp_col3:
                             s_My_x, _, _ = compute_bending_yield(s_layers_export)
                             s_Fc_x, _, _ = compute_collapse_force(s_layers_export)
                             compare_rows_export.append({
-                                'Scheme': sch['name'] + (' (current)' if sch['is_current'] else ''),
-                                'Kp_correction': p['kp_correction'],
-                                'softening_c': p['softening_c'],
-                                'eta_bond': p['eta_bond'],
-                                'EA_N': s_EA_x,
-                                'EI_N_mm2': s_EI_x,
-                                'Kp_N_per_mm': s_Kp_x,
-                                'Fu_N': s_Fu_x,
-                                'My_N_mm': s_My_x,
-                                'Fc_N': s_Fc_x
+                                '方案': sch['name'] + (' (当前)' if sch['is_current'] else ''),
+                                'Kp 修正系数': p['kp_correction'],
+                                '软化系数 c': p['softening_c'],
+                                '粘接系数 η': p['eta_bond'],
+                                '轴向刚度 EA (N)': s_EA_x,
+                                '弯曲刚度 EI (N·mm²)': s_EI_x,
+                                '抗压扁刚度 Kp (N/mm)': s_Kp_x,
+                                '轴向拉力 Fu (N)': s_Fu_x,
+                                '弯曲屈服力矩 My (N·mm)': s_My_x,
+                                '压扁屈服力 Fc (N)': s_Fc_x
                             })
                     except Exception:
                         pass
