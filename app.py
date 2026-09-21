@@ -4,6 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import io
+import copy
 
 try:
     import openpyxl
@@ -124,7 +125,7 @@ def normalize_structure(structure):
     return structure
 
 # ==================== 会话状态 ====================
-CURRENT_VERSION = "v21_en_plot"
+CURRENT_VERSION = "v22_compare"
 
 if 'structure_version' not in st.session_state or st.session_state.structure_version != CURRENT_VERSION:
     st.session_state.structure = create_default_structure()
@@ -136,6 +137,7 @@ if 'structure_version' not in st.session_state or st.session_state.structure_ver
     st.session_state.span_L = 30.0
     st.session_state.eta_bond = 0.8
     st.session_state.softening_c = 1.0
+    st.session_state.saved_schemes = []   # 多方案存储
 else:
     st.session_state.structure = normalize_structure(st.session_state.structure)
 
@@ -146,6 +148,7 @@ if 'kp_correction' not in st.session_state: st.session_state.kp_correction = 1.0
 if 'span_L' not in st.session_state: st.session_state.span_L = 30.0
 if 'eta_bond' not in st.session_state: st.session_state.eta_bond = 0.8
 if 'softening_c' not in st.session_state: st.session_state.softening_c = 1.0
+if 'saved_schemes' not in st.session_state: st.session_state.saved_schemes = []
 
 # ==================== 分段查找 ====================
 def find_segment(df, x):
@@ -633,7 +636,7 @@ with st.sidebar:
                 layer['data'],
                 num_rows="dynamic",
                 use_container_width=True,
-                key=f"data_{i}_v21"
+                key=f"data_{i}_v22"
             )
             if edited is not None and not edited.empty:
                 layer['data'] = edited.copy()
@@ -682,11 +685,75 @@ with st.sidebar:
                              step=1.0, key="span_L_input")
     st.session_state.span_L = span_L
 
+    # ==================== 多方案管理 ====================
     st.markdown("---")
-    if st.button("🔄 强制刷新计算", type="primary"):
+    st.markdown("**💾 方案管理**")
+
+    scheme_name = st.text_input("方案名称", value=f"Scheme {len(st.session_state.saved_schemes)+1}",
+                                key="scheme_name_input")
+
+    col_save, col_clear = st.columns([1, 1])
+    with col_save:
+        if st.button("💾 保存当前方案", key="save_scheme_btn", type="primary"):
+            scheme = {
+                'name': scheme_name,
+                'structure': copy.deepcopy(st.session_state.structure),
+                'L_total': L_total,
+                'ea_correction': ea_correction,
+                'kp_correction': kp_correction,
+                'eta_bond': eta_bond,
+                'softening_c': softening_c,
+                'span_L': span_L
+            }
+            # 同名则覆盖
+            existing_idx = None
+            for idx, s in enumerate(st.session_state.saved_schemes):
+                if s['name'] == scheme_name:
+                    existing_idx = idx
+                    break
+            if existing_idx is not None:
+                st.session_state.saved_schemes[existing_idx] = scheme
+                st.success(f"已覆盖方案：{scheme_name}")
+            else:
+                st.session_state.saved_schemes.append(scheme)
+                st.success(f"已保存方案：{scheme_name}")
+            st.rerun()
+    with col_clear:
+        if st.button("🗑️ 清空所有方案", key="clear_schemes_btn"):
+            st.session_state.saved_schemes = []
+            st.rerun()
+
+    # 显示已保存方案列表
+    if st.session_state.saved_schemes:
+        st.markdown(f"**已保存 {len(st.session_state.saved_schemes)} 个方案：**")
+        for idx, s in enumerate(st.session_state.saved_schemes):
+            col_name, col_load, col_del = st.columns([3, 1, 1])
+            with col_name:
+                st.caption(f"{idx+1}. {s['name']}")
+            with col_load:
+                if st.button("载入", key=f"load_scheme_{idx}"):
+                    st.session_state.structure = copy.deepcopy(s['structure'])
+                    st.session_state.L_total = s['L_total']
+                    st.session_state.ea_correction = s['ea_correction']
+                    st.session_state.kp_correction = s['kp_correction']
+                    st.session_state.eta_bond = s['eta_bond']
+                    st.session_state.softening_c = s['softening_c']
+                    st.session_state.span_L = s['span_L']
+                    # 清理 widget key
+                    for k in list(st.session_state.keys()):
+                        if k.startswith("data_") or k.startswith("name_") or k.startswith("type_"):
+                            del st.session_state[k]
+                    st.rerun()
+            with col_del:
+                if st.button("删除", key=f"del_scheme_{idx}"):
+                    st.session_state.saved_schemes.pop(idx)
+                    st.rerun()
+
+    st.markdown("---")
+    if st.button("🔄 强制刷新计算", key="refresh_btn"):
         st.rerun()
 
-    if st.button("恢复示例数据"):
+    if st.button("恢复示例数据", key="reset_btn"):
         keys_to_clear = [k for k in list(st.session_state.keys())
                          if k.startswith("data_") or k.startswith("name_") or k.startswith("type_")
                          or k.startswith("mat_select_") or k.startswith("seg_select_")
@@ -719,12 +786,10 @@ with st.expander("📖 使用说明书（点击展开）", expanded=False):
     st.markdown("""
 # 一、工具概览
 
-本工具用于微导管多层结构的**刚度**和**强度**分析。
+本工具用于微导管多层结构的**刚度**和**强度**分析，支持**多方案对比**。
 
 - **刚度**：EA 轴向、EI 弯曲、Kp 抗压扁
 - **强度**：Fu 轴向拉力、My 弯曲屈服、Fc 压扁屈服
-
-**注意**：本工具是**设计筛选工具**，不是实验替代品。
 
 ---
 
@@ -749,35 +814,38 @@ with st.expander("📖 使用说明书（点击展开）", expanded=False):
 2. **选择应用范围**：`🎯 全部段` 或 `第 N 段`
 3. **点击"填入"**：将材料参数写入指定范围
 
-## 普通材料库
+---
 
-| 材料 | E (MPa) | σ_uts (MPa) |
-|---|---|---|
-| PTFE (块体) | 500 | 106.2 |
-| PTFE (挤出管) | 200 | 80.5 |
-| Pebax 2533 | 12 | 15 |
-| Pebax 3533 | 20 | 20 |
-| Pebax 5533 | 30 | 25 |
-| Pebax 6333 | 40 | 28 |
-| Pebax 7233 | 50 | 30 |
-| 尼龙 12 | 1500 | 45 |
-| 尼龙 6 | 2500 | 70 |
-| 聚氨酯 | 30 | 30 |
-| 聚乙烯 (HDPE) | 900 | 25 |
+# 四、多方案对比
 
-## 丝材库
+## 4.1 使用流程
 
-| 材料 | E_f (MPa) | σ_f (MPa) |
-|---|---|---|
-| 不锈钢 304 (冷加工) | 193000 | 2200 |
-| 不锈钢 316LVM (冷加工) | 193000 | 2400 |
-| 镍钛合金 (超弹) | 60000 | 1200 |
-| 钴铬合金 (L605) | 220000 | 2500 |
-| 铂钨合金 | 170000 | 800 |
+1. 配置好一个方案后，在侧边栏"💾 方案管理"中输入**方案名称**
+2. 点击"保存当前方案"
+3. 修改参数或切换到其他结构，再保存为第二个方案
+4. 主区域的所有曲线图会**自动叠加显示**所有已保存方案
+
+## 4.2 图例说明
+
+- **粗实线**：当前方案的曲线
+- **细虚线**：已保存方案的曲线
+- 不同颜色代表不同方案
+
+## 4.3 方案管理
+
+- **载入**：把保存的方案恢复到当前配置
+- **删除**：删除单个方案
+- **清空所有方案**：一键删除全部
+
+## 4.4 典型用途
+
+- **设计选型**：对比不同材料、编织密度、弹簧圈螺距的刚度差异
+- **竞品对标**：录入竞品结构，和自己的方案放在一起看
+- **版本追溯**：保存设计方案的历史版本，随时调回
 
 ---
 
-# 四、刚度分析
+# 五、刚度分析
 
 | 指标 | 物理意义 |
 |---|---|
@@ -787,71 +855,29 @@ with st.expander("📖 使用说明书（点击展开）", expanded=False):
 
 ---
 
-# 五、非线性力-位移曲线
+# 六、非线性力-位移曲线
 
-## 5.1 为什么需要非线性模型
-
-线弹性外推 **F = Kp × ΔD** 只在极小变形下成立。当 ΔD 增大，导管会发生：
-
-1. **截面椭圆化**：不再是圆形，弯曲刚度急剧下降
-2. **材料屈服**：外层热熔层先屈服，进入塑性
-3. **层间滑移**：各层不再同步变形
-4. **几何软化**：整体刚度随变形增大而下降
-
-结果：**实际力-位移曲线是向下弯曲的**，而非直线。
-
-## 5.2 本工具采用的非线性模型
+## 6.1 模型
 
 $$F(\\Delta D) = \\frac{K_p \\cdot \\Delta D}{1 + c \\cdot \\Delta D / D_{outer}}$$
 
-参数：
-- $K_p$：初始线性刚度（N/mm）
-- $D_{outer}$：导管外径（mm）
-- $c$：软化系数（无量纲）
+## 6.2 软化系数 c
 
-**特性**：
-| ΔD | 行为 |
+| c 值 | 行为 |
 |---|---|
-| → 0 | F ≈ Kp × ΔD（线性段） |
-| 增大 | 分母增大，F 增长变慢（软化） |
-| → ∞ | F 趋于上限 Kp × D_outer / c |
+| 0 | 完全线性 |
+| 0.5 | 轻微软化 |
+| 1.0 | 中等软化（默认） |
+| 3.0 | 强软化 |
 
-## 5.3 软化系数 c 的选取
+## 6.3 标定顺序
 
-| c 值 | 行为 | 适用场景 |
-|---|---|---|
-| **0** | 完全线性 | 仅供对比，不真实 |
-| **0.5** | 轻微软化 | 厚壁、刚性导管 |
-| **1.0** | 中等软化 | 默认，大多数微导管 |
-| **2.0** | 明显软化 | 薄壁、柔性导管 |
-| **3.0** | 强软化 | 极易压溃 |
-
-## 5.4 与实验的关系
-
-如果做过平板压缩实验，可以把实验的 F(1mm)、F(2mm) 与理论值对比：
-
-- **实测 F(1mm) / 理论 F(1mm)** → 调整 Kp 修正系数
-- **实测曲线的弯曲程度** → 调整软化系数 c
-
-如果 c = 0 时 F(1mm) 偏高但 F(2mm) 偏差更大，说明实际有软化，需要增大 c。
-
-## 5.5 曲线图解读
-
-主区域有两条曲线：
-
-- **灰色虚线**：线弹性外推（c = 0 的极端情况）
-- **红色实线**：当前非线性模型
-
-图上标注：
-- ΔD = 1mm 和 2mm 处的 F 值（蓝、绿圆点）
-- 完全压扁位置（ΔD = 外径）
-- 外径 10% 的小变形线性区（绿色阴影）
-
-两条曲线的**偏离程度**反映软化的强度。
+1. 先用 Kp 修正系数对齐**小变形段**
+2. 再用 c 调整**大变形段的弯曲程度**
 
 ---
 
-# 六、强度分析
+# 七、强度分析
 
 | 指标 | 物理意义 |
 |---|---|
@@ -861,19 +887,19 @@ $$F(\\Delta D) = \\frac{K_p \\cdot \\Delta D}{1 + c \\cdot \\Delta D / D_{outer}
 
 **弯曲屈服控制层**：M_i = σ_uts,i · EI_total / (E_z,i · r_out,i)，最小者控制。
 
-**压扁屈服控制层**：ε_y,i = σ_uts,i / E_θ,i，最小者控制。弹簧圈通常最小。
+**压扁屈服控制层**：ε_y,i = σ_uts,i / E_θ,i，最小者控制。
 
 **轴向拉力**：弹簧圈/编织层的 Fu = 丝材贡献 + 热熔填充贡献（含 η 折减）。
 
 ---
 
-# 七、修正系数
+# 八、修正系数
 
 ## 刚度修正系数
 
 | 因素 | 典型折减 |
 |---|---|
-| 层间滑移 | 0.4~0.7 |
+| 有效模量偏低 | 0.3~0.5 |
 | 几何非线性 | 0.3~0.6 |
 | 材料屈服 | 载荷越大折减越明显 |
 
@@ -887,45 +913,26 @@ $$F(\\Delta D) = \\frac{K_p \\cdot \\Delta D}{1 + c \\cdot \\Delta D / D_{outer}
 
 ---
 
-# 八、导出功能
+# 九、导出功能
 
 - **📄 当前截面参数表 (CSV)**
 - **📈 沿长度曲线数据 (CSV)**
-- **📊 完整报告 (Excel)**：含力-位移曲线 sheet（线性 + 非线性两列）
-
----
-
-# 九、如何验证
-
-| 刚度 | 实验方法 | 公式 |
-|---|---|---|
-| EA | 拉伸 | EA = k × L₀ |
-| EI | 三点弯曲 | EI = FL³/(48δ) |
-| Kp | 平板压缩 | 初始斜率 |
-
-**标定流程**：
-1. 做一次标准实验，记录力-位移曲线
-2. 拟合初始段斜率 → Kp
-3. 拟合曲线弯曲程度 → 软化系数 c
-4. 填入侧边栏
+- **📊 完整报告 (Excel)**：含力-位移曲线 sheet
 
 ---
 
 # 十、常见问题
 
-**Q1：c 应该填多少？**
-A：没有实验时，默认 1.0。做过实验后，调 c 使曲线形状与实测接近。
+**Q1：多条曲线颜色看不清？**
+A：方案数量多时，建议在"方案管理"里删除不需要的，只保留 3~5 个对比。
 
-**Q2：为什么曲线会下弯？**
-A：反映真实导管的几何和材料非线性。c 越大，下弯越明显。
+**Q2：c 应该填多少？**
+A：没有实验时，默认 1.0。做过实验后，调 c 让曲线形状与实测接近。
 
-**Q3：完全线性（c=0）还能用吗？**
-A：能，但只适用于极小变形（ΔD < 5% 外径）。大变形下会严重高估。
-
-**Q4：改了参数图表没更新？**
+**Q3：改了参数图表没更新？**
 A：按一次 Enter，或点「🔄 强制刷新计算」。
 
-**Q5：Excel 导出报错？**
+**Q4：Excel 导出报错？**
 A：需要安装 openpyxl。
 
 ---
@@ -934,12 +941,11 @@ A：需要安装 openpyxl。
 
 | 场景 | 是否适用 |
 |---|---|
-| 相对比较两个设计方案 | ✅ |
+| 相对比较多个设计方案 | ✅ |
 | 参数扫描找最优点 | ✅ |
 | 早期发现设计缺陷 | ✅ |
 | 预测绝对刚度值 | ⚠️ 需标定 |
 | 报规格书 | ❌ 需实验 |
-| 精确压溃分析 | ❌ 需有限元 |
 | 疲劳寿命 | ❌ 需疲劳实验 |
     """)
 
@@ -954,14 +960,34 @@ kp_correction = st.session_state.kp_correction
 L_span = st.session_state.span_L
 eta_bond = st.session_state.eta_bond
 softening_c = st.session_state.softening_c
+saved_schemes = st.session_state.saved_schemes
 
 x_pos_safe = min(max(st.session_state.x_pos, 0.0), L_total)
 x_pos = st.slider("Axial position x (mm)", min_value=0.0, max_value=L_total,
                   value=x_pos_safe, step=0.5)
 st.session_state.x_pos = x_pos
 
+# 计算所有方案（当前 + 已保存）
+# 每个元素: (name, xs, EA_arr, EI_arr, Kp_arr, Fu_arr, My_arr, Fc_arr, is_current)
+all_schemes = []
+
+# 当前方案
 xs, EA_arr, EI_arr, Kp_arr, Fu_arr, My_arr, Fc_arr = compute_along_length(
     structure, L_total, ea_correction, kp_correction, eta_bond)
+all_schemes.append(("Current", xs, EA_arr, EI_arr, Kp_arr, Fu_arr, My_arr, Fc_arr, True))
+
+# 已保存方案
+for s in saved_schemes:
+    try:
+        s_xs, s_EA, s_EI, s_Kp, s_Fu, s_My, s_Fc = compute_along_length(
+            s['structure'], s['L_total'],
+            s['ea_correction'], s['kp_correction'], s['eta_bond'])
+        all_schemes.append((s['name'], s_xs, s_EA, s_EI, s_Kp, s_Fu, s_My, s_Fc, False))
+    except Exception as e:
+        st.warning(f"方案 '{s['name']}' 计算失败：{e}")
+
+# 颜色分配
+scheme_colors = plt.cm.tab10(np.linspace(0, 1, max(len(all_schemes), 1)))
 
 layers = compute_at_x(structure, x_pos, eta_bond=eta_bond)
 
@@ -982,26 +1008,38 @@ else:
     c3.metric("Crush Stiffness Kp (N/mm)", f"{Kp:.2f}")
 
     st.subheader("Stiffness along Length")
+    if len(all_schemes) > 1:
+        st.caption(f"当前方案 + {len(all_schemes)-1} 个已保存方案叠加显示。当前方案粗实线，其余细虚线。")
     fig_s, axes_s = plt.subplots(3, 1, figsize=(10, 12))
     fig_s.suptitle("Stiffness Distribution along Catheter Length", y=0.98, fontsize=13)
 
-    axes_s[0].plot(xs, EA_arr, 'b-', linewidth=2)
+    # 叠加所有方案
+    for si, (sname, s_xs, s_EA, s_EI, s_Kp, s_Fu, s_My, s_Fc, is_cur) in enumerate(all_schemes):
+        color = scheme_colors[si]
+        lw = 2.5 if is_cur else 1.5
+        ls = '-' if is_cur else '--'
+        label_s = f"{sname}" + (" (current)" if is_cur else "")
+        axes_s[0].plot(s_xs, s_EA, color=color, linewidth=lw, linestyle=ls, label=label_s)
+        axes_s[1].plot(s_xs, s_EI, color=color, linewidth=lw, linestyle=ls, label=label_s)
+        axes_s[2].plot(s_xs, s_Kp, color=color, linewidth=lw, linestyle=ls, label=label_s)
+
     axes_s[0].set_ylabel('EA (N)')
     axes_s[0].set_xlabel('Axial position (mm)')
     axes_s[0].set_title('Axial Stiffness')
     axes_s[0].grid(True); axes_s[0].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
+    axes_s[0].legend(loc='best', fontsize=8)
 
-    axes_s[1].plot(xs, EI_arr, 'g-', linewidth=2)
     axes_s[1].set_ylabel('EI (N·mm²)')
     axes_s[1].set_xlabel('Axial position (mm)')
     axes_s[1].set_title('Bending Stiffness')
     axes_s[1].grid(True); axes_s[1].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
+    axes_s[1].legend(loc='best', fontsize=8)
 
-    axes_s[2].plot(xs, Kp_arr, 'r-', linewidth=2)
     axes_s[2].set_ylabel('Kp (N/mm)')
     axes_s[2].set_xlabel('Axial position (mm)')
     axes_s[2].set_title(f'Crush Stiffness (correction × {kp_correction:.3f})')
     axes_s[2].grid(True); axes_s[2].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
+    axes_s[2].legend(loc='best', fontsize=8)
 
     fig_s.tight_layout(rect=[0, 0, 1, 0.96])
     st.pyplot(fig_s)
@@ -1026,11 +1064,30 @@ else:
 
     fig_cd, ax_cd = plt.subplots(figsize=(10, 6))
 
-    ax_cd.plot(dD_range, F_linear, '--', color='gray', linewidth=1.8,
-               label=f'Linear extrapolation (F = Kp·ΔD)')
+    # 已保存方案的非线性曲线（细虚线）
+    for si, (sname, s_xs, s_EA, s_EI, s_Kp, s_Fu, s_My, s_Fc, is_cur) in enumerate(all_schemes):
+        if is_cur:
+            continue
+        try:
+            # 用方案在其当前 x 位置（假设是相同的 x_pos）的 Kp
+            s_layers = compute_at_x(saved_schemes[si-1]['structure'], x_pos,
+                                    eta_bond=saved_schemes[si-1]['eta_bond'])
+            if s_layers:
+                s_Kp_val, _, _, _, _, _, _, _ = compute_stiffness(
+                    s_layers, saved_schemes[si-1]['ea_correction'],
+                    saved_schemes[si-1]['kp_correction'])
+                s_D_outer = 2 * max(l['r_out'] for l in s_layers)
+                s_F_nl = compute_crush_force_nonlinear(
+                    s_Kp_val, s_D_outer, dD_range, saved_schemes[si-1]['softening_c'])
+                ax_cd.plot(dD_range, s_F_nl, color=scheme_colors[si],
+                           linewidth=1.5, linestyle='--', label=f"{sname}")
+        except Exception:
+            pass
 
+    ax_cd.plot(dD_range, F_linear, '--', color='gray', linewidth=1.8,
+               label=f'Current: Linear extrapolation')
     ax_cd.plot(dD_range, F_nonlinear, 'r-', linewidth=2.5,
-               label=f'Non-linear model (c = {softening_c:.2f})')
+               label=f'Current: Non-linear (c={softening_c:.2f})')
 
     for dD_mark, color in [(1.0, 'blue'), (2.0, 'darkgreen')]:
         if dD_mark <= dD_max:
@@ -1061,7 +1118,6 @@ else:
         ax_cd.axvline(x=D_outer, color='gray', linestyle=':', alpha=0.7,
                       label=f'Full collapse (ΔD = D = {D_outer:.3f} mm)')
 
-    # 小变形线性区（英文）
     dD_10 = 0.1 * D_outer
     if dD_10 < dD_max:
         ax_cd.axvspan(0, dD_10, alpha=0.08, color='green')
@@ -1073,7 +1129,7 @@ else:
     ax_cd.set_ylabel('Radial force F (N)')
     ax_cd.set_title('Crush Force–Displacement Curve (Non-linear Model)')
     ax_cd.grid(True, linestyle='--', alpha=0.6)
-    ax_cd.legend(loc='upper left', fontsize=10)
+    ax_cd.legend(loc='upper left', fontsize=8)
     ax_cd.set_xlim(0, dD_max)
 
     y_max = max(max(F_linear), max(F_nonlinear)) * 1.15
@@ -1083,7 +1139,7 @@ else:
     st.pyplot(fig_cd)
 
     # 关键数值表
-    st.markdown("**关键变形量下的力值对比**")
+    st.markdown("**关键变形量下的力值对比（当前方案）**")
     table_rows = []
     for dD_v in [0.1, 0.2, 0.5, 1.0, 1.5, 2.0]:
         F_lin = Kp * dD_v
@@ -1098,11 +1154,52 @@ else:
         })
     st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
 
+    # ============================================================
+    # 方案对比表（当前截面）
+    # ============================================================
+    if len(all_schemes) > 1:
+        st.markdown("---")
+        st.subheader("📊 方案对比（当前截面）")
+        st.caption(f"x = {x_pos:.1f} mm 处所有方案的六项指标对比")
+
+        compare_rows = []
+        # 当前方案
+        compare_rows.append({
+            'Scheme': 'Current',
+            'EA (N)': f"{EA:.2f}",
+            'EI (N·mm²)': f"{EI:.2f}",
+            'Kp (N/mm)': f"{Kp:.2f}",
+            'Fu (N)': f"{compute_axial_strength(layers)[0]:.2f}",
+            'My (N·mm)': f"{compute_bending_yield(layers)[0]:.4f}",
+            'Fc (N)': f"{compute_collapse_force(layers)[0]:.2f}"
+        })
+        # 已保存方案
+        for s in saved_schemes:
+            try:
+                s_layers = compute_at_x(s['structure'], x_pos, eta_bond=s['eta_bond'])
+                if s_layers:
+                    s_EA, s_EI, s_Kp, _, _, _, _, _ = compute_stiffness(
+                        s_layers, s['ea_correction'], s['kp_correction'])
+                    s_Fu, _ = compute_axial_strength(s_layers)
+                    s_My, _, _ = compute_bending_yield(s_layers)
+                    s_Fc, _, _ = compute_collapse_force(s_layers)
+                    compare_rows.append({
+                        'Scheme': s['name'],
+                        'EA (N)': f"{s_EA:.2f}",
+                        'EI (N·mm²)': f"{s_EI:.2f}",
+                        'Kp (N/mm)': f"{s_Kp:.2f}",
+                        'Fu (N)': f"{s_Fu:.2f}",
+                        'My (N·mm)': f"{s_My:.4f}",
+                        'Fc (N)': f"{s_Fc:.2f}"
+                    })
+            except Exception:
+                pass
+        st.dataframe(pd.DataFrame(compare_rows), use_container_width=True, hide_index=True)
+
     st.info(
         f"**模型说明**：非线性模型 F = Kp·ΔD / (1 + c·ΔD/D) 中，"
         f"c 越大曲线越向下弯曲。当前 c = {softening_c:.2f}。"
         f"如果做过实验，可以调整 c 让曲线形状与实测接近。"
-        f"具体操作：先用 Kp 修正系数对齐小变形段，再用 c 调整大变形段的弯曲程度。"
     )
 
     st.subheader("Cross-section View")
@@ -1191,41 +1288,43 @@ if layers:
     st.info(f"**弯曲屈服控制层**：{bending_ctrl}。**压扁屈服控制层**：{collapse_ctrl}。")
 
     st.subheader("Strength along Length")
+    if len(all_schemes) > 1:
+        st.caption(f"当前方案 + {len(all_schemes)-1} 个已保存方案叠加显示。")
     fig_t, axes_t = plt.subplots(3, 1, figsize=(10, 12))
     fig_t.suptitle("Strength Distribution along Catheter Length", y=0.98, fontsize=13)
 
-    axes_t[0].plot(xs, Fu_arr, 'm-', linewidth=2)
+    for si, (sname, s_xs, s_EA, s_EI, s_Kp, s_Fu, s_My, s_Fc, is_cur) in enumerate(all_schemes):
+        color = scheme_colors[si]
+        lw = 2.5 if is_cur else 1.5
+        ls = '-' if is_cur else '--'
+        label_s = f"{sname}" + (" (current)" if is_cur else "")
+        axes_t[0].plot(s_xs, s_Fu, color=color, linewidth=lw, linestyle=ls, label=label_s)
+        axes_t[1].plot(s_xs, s_My, color=color, linewidth=lw, linestyle=ls, label=label_s)
+        axes_t[2].plot(s_xs, s_Fc, color=color, linewidth=lw, linestyle=ls, label=label_s)
+
     axes_t[0].set_ylabel('Fu (N)')
     axes_t[0].set_xlabel('Axial position (mm)')
     axes_t[0].set_title('Max Axial Tensile Force')
     axes_t[0].grid(True); axes_t[0].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
+    axes_t[0].legend(loc='best', fontsize=8)
 
     ax_my = axes_t[1]
-    ax_my.plot(xs, My_arr, 'c-', linewidth=2, label='My')
-    ax_my.set_ylabel('My (N·mm)', color='c')
+    ax_my.set_ylabel('My (N·mm)')
     ax_my.set_xlabel('Axial position (mm)')
-    ax_my.tick_params(axis='y', labelcolor='c')
-    ax_my.set_title('Bending Yield Moment & Force')
+    ax_my.set_title('Bending Yield Moment')
     ax_my.grid(True); ax_my.axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
+    ax_my.legend(loc='best', fontsize=8)
 
-    ax_my2 = ax_my.twinx()
-    Fy_arr = 4 * My_arr / L_span if L_span > 0 else np.zeros_like(My_arr)
-    ax_my2.plot(xs, Fy_arr, color='orange', linewidth=2, linestyle='--',
-                label=f'Fy (3-pt, L={L_span:.0f} mm)')
-    ax_my2.set_ylabel(f'Fy (N, L={L_span:.0f} mm)', color='orange')
-    ax_my2.tick_params(axis='y', labelcolor='orange')
-
-    axes_t[2].plot(xs, Fc_arr, 'y-', linewidth=2)
     axes_t[2].set_ylabel('Fc (N)')
     axes_t[2].set_xlabel('Axial position (mm)')
     axes_t[2].set_title('Collapse Force (weakest layer controls)')
     axes_t[2].grid(True); axes_t[2].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
+    axes_t[2].legend(loc='best', fontsize=8)
 
     fig_t.tight_layout(rect=[0, 0, 1, 0.96])
     st.pyplot(fig_t)
 
     st.subheader("Bending Yield — Candidate Layers")
-    st.caption(f"每层单独达到抗拉强度时所需的整体弯矩与三点弯曲力（L = {L_span:.1f} mm）。取最小值作为控制层。")
     b_rows = []
     for c in bending_cands:
         M_i = c['M_y']
@@ -1241,7 +1340,6 @@ if layers:
     st.dataframe(pd.DataFrame(b_rows), use_container_width=True)
 
     st.subheader("Collapse — Candidate Layers")
-    st.caption("每层单独达到抗拉强度时所需的整体压扁力。取最小值作为控制层。")
     c_rows = []
     for c in collapse_cands:
         c_rows.append({
@@ -1255,7 +1353,6 @@ if layers:
     st.dataframe(pd.DataFrame(c_rows), use_container_width=True)
 
     st.subheader("Axial Tensile — Layer Contributions")
-    st.caption("弹簧圈/编织层的 Fu = 丝材贡献 + 热熔填充贡献（后者含 η 折减）。")
     fu_rows = []
     for i, l in enumerate(layers):
         if l['type'] == '弹簧圈':
@@ -1345,8 +1442,10 @@ with exp_col3:
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
             overview_data = {
                 '参数': ['导管总长度 (mm)', '当前轴向位置 (mm)', 'EA 修正系数',
-                         'Kp 修正系数', '粘接系数 η', '三点弯曲跨距 (mm)', '软化系数 c'],
-                '值': [L_total, x_pos, ea_correction, kp_correction, eta_bond, L_span, softening_c]
+                         'Kp 修正系数', '粘接系数 η', '三点弯曲跨距 (mm)', '软化系数 c',
+                         '已保存方案数'],
+                '值': [L_total, x_pos, ea_correction, kp_correction, eta_bond, L_span, softening_c,
+                       len(saved_schemes)]
             }
             pd.DataFrame(overview_data).to_excel(writer, sheet_name='概览', index=False)
 
@@ -1371,6 +1470,41 @@ with exp_col3:
                 param_df.to_excel(writer, sheet_name='当前截面参数', index=False)
 
             curve_df.to_excel(writer, sheet_name='沿长度曲线', index=False)
+
+            # 方案对比
+            if len(all_schemes) > 1:
+                compare_rows_export = []
+                for si, (sname, s_xs, s_EA, s_EI, s_Kp, s_Fu, s_My, s_Fc, is_cur) in enumerate(all_schemes):
+                    # 在 x_pos 处的值
+                    try:
+                        if is_cur:
+                            s_layers_export = layers
+                            s_EA_x, s_EI_x, s_Kp_x, _, _, _, _, _ = compute_stiffness(
+                                layers, ea_correction, kp_correction)
+                        else:
+                            s_obj = saved_schemes[si-1]
+                            s_layers_export = compute_at_x(s_obj['structure'], x_pos,
+                                                          eta_bond=s_obj['eta_bond'])
+                            s_EA_x, s_EI_x, s_Kp_x, _, _, _, _, _ = compute_stiffness(
+                                s_layers_export, s_obj['ea_correction'], s_obj['kp_correction'])
+                        if s_layers_export:
+                            s_Fu_x, _ = compute_axial_strength(s_layers_export)
+                            s_My_x, _, _ = compute_bending_yield(s_layers_export)
+                            s_Fc_x, _, _ = compute_collapse_force(s_layers_export)
+                            compare_rows_export.append({
+                                'Scheme': sname + (' (current)' if is_cur else ''),
+                                'EA_N': s_EA_x,
+                                'EI_N_mm2': s_EI_x,
+                                'Kp_N_per_mm': s_Kp_x,
+                                'Fu_N': s_Fu_x,
+                                'My_N_mm': s_My_x,
+                                'Fc_N': s_Fc_x
+                            })
+                    except Exception:
+                        pass
+                if compare_rows_export:
+                    pd.DataFrame(compare_rows_export).to_excel(
+                        writer, sheet_name=f'方案对比_x{x_pos:.0f}mm', index=False)
 
             for i, layer in enumerate(structure):
                 sheet_name = f'层{i+1}_{layer["name"]}'[:31]
