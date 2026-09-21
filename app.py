@@ -1993,4 +1993,24 @@ with exp_col3:
                         pass
                 if compare_rows_export:
                     pd.DataFrame(compare_rows_export).to_excel(
-                        writer, sheet_name=f'方案对比_x{x_pos
+                        writer, sheet_name=f'方案对比_x{x_pos:.0f}mm', index=False)
+
+            for i, layer in enumerate(structure):
+                sheet_name = f'层{i+1}_{layer["name"]}'[:31]
+                try:
+                    layer['data'].to_excel(writer, sheet_name=sheet_name, index=False)
+                except Exception:
+                    pass
+        buffer.seek(0)
+        st.download_button(
+            label="📊 完整报告 (Excel)",
+            data=buffer.getvalue(),
+            file_name="catheter_analysis_report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_excel"
+        )
+    else:
+        st.button("📊 完整报告 (需 openpyxl)", disabled=True, key="dl_excel_disabled")
+        st.caption("安装: pip install openpyxl")
+
+st.caption("CSV 用 UTF-8 with BOM 编码，Excel 打开不会乱码。")
