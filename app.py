@@ -125,7 +125,7 @@ def normalize_structure(structure):
     return structure
 
 # ==================== 会话状态 ====================
-CURRENT_VERSION = "v30_contrib_tables"
+CURRENT_VERSION = "v31_stiffness_contrib"
 
 if 'structure_version' not in st.session_state or st.session_state.structure_version != CURRENT_VERSION:
     st.session_state.structure = create_default_structure()
@@ -437,13 +437,6 @@ def compute_axial_strength(layers):
     return sum(Fu_layer), Fu_layer
 
 def compute_bending_yield(layers):
-    """
-    返回：
-      M_y (整体屈服弯矩)
-      ctrl_layer (控制层名称)
-      candidates (每层控制时的整体屈服弯矩)
-      contributions (在整体屈服时刻，每层实际承担的弯矩和占比)
-    """
     if not layers:
         return 0.0, None, [], []
 
@@ -477,7 +470,6 @@ def compute_bending_yield(layers):
     M_y = candidates[0]['M_y']
     ctrl_layer = candidates[0]['layer']
 
-    # 在整体屈服时刻，每层实际承担的弯矩（按 EI 比例分配）
     contributions = []
     for i, l in enumerate(layers):
         EI_i = EI_list[i]
@@ -498,13 +490,6 @@ def compute_bending_yield(layers):
     return M_y, ctrl_layer, candidates, contributions
 
 def compute_collapse_force(layers):
-    """
-    返回：
-      F_c (整体屈服力)
-      ctrl_layer (控制层名称)
-      candidates (每层控制时的整体屈服力)
-      contributions (在整体屈服时刻，每层实际承担的弯矩和占比)
-    """
     if not layers:
         return 0.0, None, [], []
 
@@ -542,8 +527,6 @@ def compute_collapse_force(layers):
     F_c = candidates[0]['F_c']
     ctrl_layer = candidates[0]['layer']
 
-    # 在整体屈服时刻，每层实际承担的弯矩（按 EI_theta 比例分配）
-    # 整体弯矩 M_max = C × F_c × R
     M_max = C * F_c * R
     contributions = []
     for i, l in enumerate(layers):
@@ -709,7 +692,7 @@ with st.sidebar:
                 layer['data'],
                 num_rows="dynamic",
                 use_container_width=True,
-                key=f"data_{i}_v30"
+                key=f"data_{i}_v31"
             )
             if edited is not None and not edited.empty:
                 layer['data'] = edited.copy()
@@ -873,8 +856,8 @@ with st.expander("2. 界面总览", expanded=False):
 | 单位约定 | 全局单位说明 |
 | 使用说明书 | 分模块展开（本区块） |
 | 轴向位置滑块 | 选择截面位置 |
-| 第一部分：刚度分析 | 3 指标 + 3 曲线 + 力-位移曲线 + 方案对比 + 截面图 + 贡献图 |
-| 第二部分：强度分析 | 4 指标 + 3 曲线 + 三张候选/贡献层表 |
+| 第一部分：刚度分析 | 3 指标 + 3 曲线 + 力-位移曲线 + 方案对比 + 截面图 + 各层贡献图和表 |
+| 第二部分：强度分析 | 4 指标 + 3 曲线 + 三张贡献/候选层表 |
 | 参数明细表 | 当前截面所有层参数 |
 | 导出功能 | 3 个导出按钮 |
 
@@ -987,9 +970,10 @@ with st.expander("5. 刚度分析", expanded=False):
 - 点线填充：热熔自动填充层
 - 纯色：普通材料
 
-## 贡献条形图
+## 各层刚度贡献
 
-显示每层对 EA、EI、Kp 的贡献百分比。找出"主力层"。
+- 条形图：可视化对比
+- 明细表：每层对 EA、EI、Kp 的贡献值和占比，附合计行
 
 ## 壁厚比提示
 
@@ -1010,47 +994,40 @@ with st.expander("6. 强度分析", expanded=False):
 | **My** | N·mm | 弯曲屈服力矩 |
 | **Fc** | N | 压扁起始屈服力 |
 
-## 弯曲屈服候选层表
+## 弯曲屈服 — 各层贡献
 
-每层的"屈服弯矩"含义：当该层表面刚好达到抗拉强度时，整体截面所承受的弯矩。整体弯曲屈服力矩取所有层中的最小值。
+- **该层屈服时整体弯矩**：候选值，用于找控制层
+- **整体屈服时该层承担弯矩**：实际分配，相加等于整体弯矩
+- **占比**：该层弯矩占整体的百分比
+- 控制层用 ★ 标记
 
-表格另外给出**整体屈服时刻每层实际承担的弯矩和占比**，方便看各层弯矩分配。
+## 压扁屈服 — 各层贡献
 
-## 压扁屈服候选层表
-
-每层的"屈服力"含义：当该层表面刚好达到抗拉强度时，整体截面所承受的对径压力。整体压扁屈服力取所有层中的最小值。
-
-表格另外给出**整体屈服时刻每层实际承担的弯矩和占比**，方便看各层弯矩分配。
+- **该层屈服时整体受力**：候选值，取最小值作为整体屈服力
+- **整体屈服时该层承担弯矩**：实际分配
+- **占比**：该层弯矩占整体的百分比
+- 控制层用 ★ 标记
 
 ## 轴向拉力分解
 
-弹簧圈/编织层的 Fu 由两部分组成：
-
-- **丝材/弹簧贡献**：丝材或弹簧本身的贡献
-- **热熔填充贡献**：热熔材料填充空隙后的贡献（含粘接系数 η 折减）
-
-弹簧圈层的热熔填充贡献往往大于弹簧丝本身。
+弹簧圈/编织层的 Fu 由两部分组成：丝材/弹簧贡献 + 热熔填充贡献（含粘接系数 η 折减）。
     """)
 
 with st.expander("7. 非线性力-位移曲线", expanded=False):
     st.markdown("""
 ## 模型
 
-抗压扁力随变形增大而逐渐软化：
-
 F(ΔD) = Kp · ΔD / (1 + c · ΔD / D)
-
-其中 Kp 为初始线性刚度，D 为外径，c 为软化系数。
 
 ## 软化系数 c
 
-| c 值 | 行为 | 适用场景 |
-|---|---|---|
-| 0 | 完全线性 | 仅供对比 |
-| 0.5 | 轻微软化 | 厚壁、刚性导管 |
-| 1.0 | 中等软化 | 默认，大多数微导管 |
-| 2.0 | 明显软化 | 薄壁、柔性导管 |
-| 3.0 | 强软化 | 极易压溃 |
+| c 值 | 行为 |
+|---|---|
+| 0 | 完全线性 |
+| 0.5 | 轻微软化 |
+| 1.0 | 中等软化（默认） |
+| 2.0 | 明显软化 |
+| 3.0 | 强软化 |
 
 ## 曲线图解读
 
@@ -1058,31 +1035,17 @@ F(ΔD) = Kp · ΔD / (1 + c · ΔD / D)
 - 红色实线：当前方案非线性
 - 其他颜色虚线：已保存方案
 - 蓝/绿圆点：ΔD = 1mm、2mm 处的力值
-- 灰竖点线：完全压扁位置
-- 绿阴影：外径 10% 内的小变形线性区
     """)
 
 with st.expander("8. 修正系数一览", expanded=False):
     st.markdown("""
-| 系数 | 作用 | 默认值 | 影响范围 |
-|---|---|---|---|
-| EA 修正 | 修正轴向刚度理论值 | 1.0 | EA 绝对值 |
-| Kp 修正 | 修正抗压扁刚度理论值 | 1.0 | Kp 绝对值 |
-| 粘接系数 η | 修正热熔填充拉力贡献 | 0.8 | Fu 绝对值 |
-| 软化系数 c | 控制力-位移曲线弯曲程度 | 1.0 | 曲线形状 |
-| 跨距 L | 三点弯曲实验支点距离 | 30 mm | My 转 Fy |
-
-## 为什么需要修正
-
-理论模型存在以下理想化假设：
-
-1. 材料线弹性：实际聚合物在大变形下会屈服
-2. 完全粘接：实际层间可能有滑移
-3. 圆环截面：实际压扁时截面椭圆化
-4. 平面截面：实际有剪切变形
-5. 材料均匀：极薄管的有效模量低于块体
-
-结果：理论值通常比实测值高 2~3 倍，需要通过修正系数折减。
+| 系数 | 作用 | 默认值 |
+|---|---|---|
+| EA 修正 | 修正轴向刚度理论值 | 1.0 |
+| Kp 修正 | 修正抗压扁刚度理论值 | 1.0 |
+| 粘接系数 η | 修正热熔填充拉力贡献 | 0.8 |
+| 软化系数 c | 控制力-位移曲线弯曲程度 | 1.0 |
+| 跨距 L | 三点弯曲实验支点距离 | 30 mm |
 
 **修正系数不能直接测量**，它们是从可测的实验曲线反推出来的。标定流程见第 9 节。
     """)
@@ -1091,12 +1054,7 @@ with st.expander("9. 实验标定流程（详细步骤）", expanded=False):
     st.markdown("""
 ## 9.1 准备工作
 
-**设备：**
-- 万能材料试验机（Instron、Zwick 等），量程 5~50 N
-- 拉伸夹具（不能压扁导管）
-- 平板压缩夹具（两块平行硬质平板）
-- 三点弯曲夹具（两个支撑点 + 一个加载头）
-- 游标卡尺或光学测量仪
+**设备：** 万能材料试验机、拉伸夹具、平板压缩夹具、三点弯曲夹具、游标卡尺。
 
 **样品：** 至少 3 根同批次导管。
 
@@ -1107,46 +1065,20 @@ with st.expander("9. 实验标定流程（详细步骤）", expanded=False):
 ### 实验步骤
 
 1. **取样**：取一段导管，长度 L₀ = 100 mm
-2. **夹持**：两端插入金属芯轴，用锥形夹头夹住，避免压扁管腔
-3. **加载**：以 1 mm/min 的恒定速度拉伸
-4. **记录**：力 F 和位移 δ 的完整曲线，直到拉断或拉长 10%
-5. **重复**：至少测 3 根，取平均
+2. **夹持**：两端插入金属芯轴，用锥形夹头夹住
+3. **加载**：以 1 mm/min 恒定速度拉伸
+4. **记录**：力 F 和位移 δ 完整曲线
+5. **重复**：至少测 3 根取平均
 
 ### 数据处理
 
-**第一步：算实测 EA**
+**EA 实测** = 初始线性段斜率 k × L₀
 
-取曲线初始线性段（通常在前 1~5% 应变），斜率 k = ΔF/Δδ。
+**EA 修正系数** = EA 实测 / EA 理论
 
-EA_实测 = k × L₀
-
-例如：L₀ = 100 mm，斜率 k = 0.28 N/mm，则 EA_实测 = 28 N。
-
-**第二步：算 EA 修正系数**
-
-在工具中输入和实验样品相同的参数，得到 EA_理论。
-
-EA 修正系数 = EA_实测 / EA_理论
-
-例如：EA_实测 = 28 N，EA_理论 = 45 N，则 EA 修正系数 = 0.62。
-
-**第三步：算粘接系数 η**
-
-看曲线的断裂点或最高点，得到 Fu_实测。
-
-在工具中把 η 暂时设为 1.0，得到 Fu_理论(η=1)。
-
-先记录两个值：
-- Fu_不含热熔：所有层 Fu_fiber 之和（不含 Fu_matrix）
-- Fu_理论(η=1)：把 η 设为 1.0 时的总 Fu
-
-则：
+**粘接系数 η**：由 Fu_实测 和 Fu_理论(η=1) 反推
 
 η = (Fu_实测 - Fu_不含热熔) / (Fu_理论(η=1) - Fu_不含热熔)
-
-例如：Fu_实测 = 10.5 N，Fu_不含热熔 = 8.0 N，Fu_理论(η=1) = 13.0 N，则 η = (10.5 - 8.0) / (13.0 - 8.0) = 0.5。
-
-**简化做法**：如果不方便算 Fu_不含热熔，直接看 Fu_实测 和 Fu_理论(η=1) 的比值，然后调 η 让工具算出的 Fu 和实测对齐即可。
 
 ---
 
@@ -1154,71 +1086,30 @@ EA 修正系数 = EA_实测 / EA_理论
 
 ### 实验步骤
 
-1. **取样**：取一段短导管，长度 5~10 mm（太长会弯曲，不是纯压扁）
-2. **放置**：水平放在两块平行平板之间
-3. **加载**：上平板以恒定速度下压（如 1 mm/min）
-4. **记录**：力 F 和位移 δ（即直径减小量 ΔD）的完整曲线，直到直径减小 50% 或压溃
-5. **重复**：至少测 3 根，取平均
-
-**注意：**
-- 试样要短（5~10 mm），避免梁效应
-- 平板要平行、光滑
-- 记录的是位移（直径减小量），不是应变
+1. **取样**：短导管 5~10 mm
+2. **放置**：两块平行平板之间
+3. **加载**：恒定速度下压
+4. **记录**：力 F 和位移 δ（直径减小量 ΔD）完整曲线
 
 ### 数据处理
 
-**第一步：算实测 Kp**
+**Kp 实测** = 初始线性段斜率
 
-取曲线初始线性段（通常在前 5~10% 外径变化），斜率 k = ΔF/ΔD。
+**Kp 修正系数** = Kp 实测 / Kp 理论
 
-Kp_实测 = k
+**软化系数 c**：由曲线上两点 A、B 反推
 
-例如：斜率 k = 3.2 N/mm，则 Kp_实测 = 3.2 N/mm。
-
-**第二步：算 Kp 修正系数**
-
-在工具中输入和实验样品相同的参数，得到 Kp_理论。
-
-Kp 修正系数 = Kp_实测 / Kp_理论
-
-例如：Kp_实测 = 3.2 N/mm，Kp_理论 = 8.0 N/mm，则 Kp 修正系数 = 0.40。
-
-**第三步：算软化系数 c**
-
-从实测曲线上取两个点（避开初始线性段），例如：
-
-- 点 A：ΔD = 0.5 mm，F = F_A = 2.0 N
-- 点 B：ΔD = 1.0 mm，F = F_B = 3.5 N
-
-代入非线性模型 F(ΔD) = Kp · ΔD / (1 + c · ΔD / D)，两式相除消掉 Kp：
-
-F_A / F_B = [0.5 / (1 + c · 0.5 / D)] / [1.0 / (1 + c · 1.0 / D)]
-
-整理得：
-
-c = 2D(r - 0.5) / (1 - r)
-
-其中 r = F_A / F_B，D 是导管外径。
-
-例如：D = 0.8 mm，r = 2.0 / 3.5 = 0.571，则：
-
-c = 2 × 0.8 × (0.571 - 0.5) / (1 - 0.571) = 0.265
-
-**验证**：把 Kp 修正和 c 填进工具，看理论曲线是否和实测曲线重合。如果不重合，调整取点位置重新计算。
+c = 2D(r - 0.5) / (1 - r)，其中 r = F_A / F_B，D 为外径
 
 ---
 
 ## 9.4 三点弯曲跨距 L
 
-直接用卡尺量三点弯曲夹具两个支点之间的距离。填进侧边栏。
-
-例如：两个支撑点间距 30 mm，则 L = 30 mm。
+卡尺量三点弯曲夹具两支撑点距离。
 
 ---
 
 ## 9.5 完整标定示例
-
-**实验数据**（假设某微导管）：
 
 | 项目 | 数值 |
 |---|---|
@@ -1233,43 +1124,31 @@ c = 2 × 0.8 × (0.571 - 0.5) / (1 - 0.571) = 0.265
 
 **标定结果：**
 
-| 系数 | 计算过程 | 数值 |
-|---|---|---|
-| EA 修正 | 28 / 45 | 0.62 |
-| Kp 修正 | 3.2 / 8.0 | 0.40 |
-| 软化系数 c | 2×0.8×(0.571-0.5)/(1-0.571) | 0.27 |
-| 粘接系数 η | (10.5-8.0)/(13.0-8.0) | 0.50 |
-| 跨距 L | 卡尺测量 | 30 mm |
-
-把这 5 个数填进侧边栏。
+| 系数 | 数值 |
+|---|---|
+| EA 修正 | 0.62 |
+| Kp 修正 | 0.40 |
+| 软化系数 c | 0.27 |
+| 粘接系数 η | 0.50 |
+| 跨距 L | 30 mm |
 
 ---
 
-## 9.6 没有万能试验机时的替代方案
+## 9.6 替代方案
 
-**拉伸替代：**
-- 把导管竖直悬挂，下端挂已知重量的砝码
-- 用游标卡尺测量伸长量
-- EA_实测 = mg · L₀ / ΔL
-
-**压缩替代：**
-- 把导管放在游标卡尺的两个量爪之间
-- 用弹簧测力计缓慢加压
-- 记录力与管径变化
-
-精度差一些，但趋势可用。
+无万能试验机时：挂砝码测拉伸，弹簧测力计加压测压缩。
 
 ---
 
 ## 9.7 标定后的使用
 
-1. **同类结构复用**：结构相近（层序相同、材料相近）的导管可以共用同一套系数
-2. **结构变化较大时重新标定**：例如编织密度差 3 倍以上
-3. **定期复测**：材料批次更换后建议重新标定
+- 同类结构复用同一套系数
+- 结构变化较大时重新标定
+- 材料批次更换后复测
 
 ---
 
-## 9.8 不能做实验时的保守默认值
+## 9.8 保守默认值
 
 | 系数 | 保守值 |
 |---|---|
@@ -1279,12 +1158,7 @@ c = 2 × 0.8 × (0.571 - 0.5) / (1 - 0.571) = 0.265
 | 软化系数 c | 1.0 |
 | 跨距 L | 30 mm |
 
-**此时工具的作用：**
-- 对比不同设计方案的相对优劣
-- 找趋势、找拐点、找最优点
-- 早期发现设计缺陷
-
-**不能做**：报绝对数值。
+**此时工具可做相对比较，不能报绝对数值。**
     """)
 
 with st.expander("10. 多方案对比", expanded=False):
@@ -1295,15 +1169,6 @@ with st.expander("10. 多方案对比", expanded=False):
 2. 点击"保存当前方案"
 3. 修改参数或切换结构，保存第二个方案
 4. 主区域曲线图自动叠加显示所有方案
-
-## 图例解读
-
-每个图例包含方案名 + 关键参数：
-
-- Current (Kp_corr=X.XX, c=X.XX)
-- 方案名 (Kp_corr=X.XX, c=X.XX)
-
-力-位移曲线的图例额外显示 Kp 值。
 
 ## 关键机制：快照
 
@@ -1324,40 +1189,37 @@ with st.expander("11. 导出功能", expanded=False):
 
 Excel 报告的 sheet：概览、当前截面指标、力-位移曲线、当前截面参数、沿长度曲线、方案对比、各层原始数据。
 
-CSV 用 UTF-8 with BOM 编码，Excel 直接打开不会乱码。
+CSV 用 UTF-8 with BOM 编码。
     """)
 
 with st.expander("12. 常见问题", expanded=False):
     st.markdown("""
-**Q1：算出来 Kp 太大，感觉不现实？**
+**Q1：算出来 Kp 太大？**
 A：Kp 是线性小变形刚度，真实值需乘修正系数 0.3~0.5。
 
 **Q2：为什么改了模量，Fu 没变？**
 A：Fu 只取决于抗拉强度，与弹性模量无关。
 
 **Q3：为什么弹簧圈层 Fu 有多个分量？**
-A：弹簧圈层 Fu = 弹簧丝贡献 + 热熔填充贡献。后者往往更大。
+A：弹簧圈层 Fu = 弹簧丝贡献 + 热熔填充贡献。
 
-**Q4：为什么弯曲屈服不是最外层控制？**
-A：控制层由轴向模量、外半径、抗拉强度三者共同决定。
+**Q4：为什么弯曲/压扁屈服不是最外层控制？**
+A：控制层由模量、外半径、抗拉强度共同决定。
 
-**Q5：为什么弹簧圈是压扁屈服控制层？**
-A：弹簧圈屈服应变（抗拉强度除以环向模量）最小。
+**Q5：弯曲/压扁候选层表里"该层屈服时整体…"和"整体屈服时该层承担…"有什么区别？**
+A：前者是"如果该层是控制层，整体会是多少"，用于找短板；后者是"整体已经屈服时，该层实际分到多少"，用于看分配。
 
-**Q6：弯曲/压扁候选层表的"实际承担弯矩"是什么？**
-A：整体屈服时刻，各层按自身 EI 比例分到的实际弯矩。它们相加等于整体屈服弯矩。控制层是候选值最小的那一层。
+**Q6：c 应该填多少？**
+A：没有实验时默认 1.0。
 
-**Q7：c 应该填多少？**
-A：没有实验时默认 1.0。做过实验后，调 c 让曲线形状与实测接近。
+**Q7：为什么 Scheme 的 Kp 和 Current 差很多？**
+A：方案是快照，看图例里的 Kp_corr 和 c 值。
 
-**Q8：为什么 Scheme 的 Kp 和 Current 差很多？**
-A：方案是快照，保存时的参数可能和现在不同。看图例里的 Kp_corr 和 c 值。
-
-**Q9：改了参数图表没更新？**
+**Q8：改了参数图表没更新？**
 A：按一次 Enter，或点"🔄 强制刷新计算"。
 
-**Q10：Excel 导出报错？**
-A：需要安装 openpyxl：pip install openpyxl。
+**Q9：Excel 导出报错？**
+A：需要安装 openpyxl。
     """)
 
 with st.expander("13. 物理背景与局限", expanded=False):
@@ -1367,7 +1229,7 @@ with st.expander("13. 物理背景与局限", expanded=False):
 - 多层同心圆管，各层完全粘接
 - 材料线弹性（非线性通过修正系数补偿）
 - 小变形假设（大变形通过软化系数补偿）
-- Timoshenko 薄环理论用于抗压扁（厚壁用厚环修正）
+- Timoshenko 薄环理论用于抗压扁
 
 ## 主要简化
 
@@ -1389,16 +1251,10 @@ with st.expander("13. 物理背景与局限", expanded=False):
 | 报规格书 | 需实验 |
 | 预测扭结精确位置 | 需有限元 |
 | 疲劳寿命 | 需疲劳实验 |
-| 长期蠕变 | 需粘弹性模型 |
 
 ## 工具定位
 
 本工具是**设计筛选工具**，不是实验替代品。
-
-- 作用：在 5 分钟内扫 100 种结构组合，找出最有希望的几种
-- 不作用：替代实验、报规格书、精确预测失效
-
-**使用建议**：先做一次标定实验（半天），得到修正系数后，工具就可以用于同类导管的快速预测。
     """)
 
 # ============================================================
@@ -1723,6 +1579,45 @@ else:
     fig_cb.tight_layout(rect=[0, 0, 1, 0.95])
     st.pyplot(fig_cb)
 
+    # 各层刚度贡献明细表（新增）
+    st.markdown("**各层刚度贡献明细**")
+    stiff_rows = []
+    for i, l in enumerate(layers):
+        # EA 各层贡献（含修正）：EA_c[i] × ea_corr，使各层相加 = EA
+        ea_i_display = EA_c[i] * ea_correction
+        # EI 无修正，直接使用 EI_c[i]
+        ei_i_display = EI_c[i]
+        # Kp 各层贡献：Kp_c[i] 已经按修正后的总 Kp 分配
+        kp_i_display = Kp_c[i]
+
+        stiff_rows.append({
+            "层": l['name'],
+            "类型": l['type'],
+            "EA 贡献 (N)": f"{ea_i_display:.4f}",
+            "EA 占比 (%)": f"{ea_pct[i]:.2f}%",
+            "EI 贡献 (N·mm²)": f"{ei_i_display:.4f}",
+            "EI 占比 (%)": f"{ei_pct[i]:.2f}%",
+            "Kp 贡献 (N/mm)": f"{kp_i_display:.4f}",
+            "Kp 占比 (%)": f"{kp_pct[i]:.2f}%",
+        })
+
+    # 合计行
+    stiff_rows.append({
+        "层": "合计",
+        "类型": "",
+        "EA 贡献 (N)": f"{EA:.4f}",
+        "EA 占比 (%)": "100.00%",
+        "EI 贡献 (N·mm²)": f"{EI:.4f}",
+        "EI 占比 (%)": "100.00%",
+        "Kp 贡献 (N/mm)": f"{Kp:.4f}",
+        "Kp 占比 (%)": "100.00%",
+    })
+    st.dataframe(pd.DataFrame(stiff_rows), use_container_width=True, hide_index=True)
+    st.caption(
+        "说明：EA 各层贡献已乘 EA 修正系数，相加等于总 EA。"
+        "Kp 各层贡献按各层环向弯曲刚度比例分配，相加等于总 Kp。"
+    )
+
     filler_names = [l['name'] for l in layers if l.get('is_filler', False)]
     if filler_names:
         st.info(f"当前段缺失的层已自动用热熔材料填充：{', '.join(filler_names)}。")
@@ -1794,17 +1689,14 @@ if layers:
     fig_t.tight_layout(rect=[0, 0, 1, 0.96])
     st.pyplot(fig_t)
 
-    # ============================================================
     # 弯曲屈服 — 各层贡献表
-    # ============================================================
     st.subheader("弯曲屈服 — 各层贡献")
     st.caption(
-        "表格说明：整体弯曲屈服力矩取所有层候选值的最小值。"
-        "各层\"实际承担弯矩\"是整体屈服时刻每层按刚度比例分到的弯矩，"
-        "相加等于整体屈服弯矩。控制层是候选值最小的那一层。"
+        "整体弯曲屈服力矩取所有层候选值的最小值。"
+        "\"该层屈服时整体弯矩\"用于找控制层；"
+        "\"整体屈服时该层承担弯矩\"是实际分配，相加等于整体弯矩。"
     )
 
-    # 构建表格：以 contributions 为主，加入候选值和层参数
     b_ctrl_dict = {c['layer']: c for c in bending_cands}
     b_rows = []
     for contrib in bending_contribs:
@@ -1823,14 +1715,12 @@ if layers:
         })
     st.dataframe(pd.DataFrame(b_rows), use_container_width=True)
 
-    # ============================================================
     # 压扁屈服 — 各层贡献表
-    # ============================================================
     st.subheader("压扁屈服 — 各层贡献")
     st.caption(
-        "表格说明：整体压扁屈服力取所有层候选值的最小值。"
-        "各层\"实际承担弯矩\"是整体屈服时刻每层按刚度比例分到的弯矩，"
-        "相加等于整体屈服时的最大弯矩。控制层是候选值最小的那一层。"
+        "整体压扁屈服力取所有层候选值的最小值。"
+        "\"该层屈服时整体受力\"用于找控制层；"
+        "\"整体屈服时该层承担弯矩\"是实际分配。"
     )
 
     c_ctrl_dict = {c['layer']: c for c in collapse_cands}
@@ -1851,9 +1741,7 @@ if layers:
         })
     st.dataframe(pd.DataFrame(c_rows), use_container_width=True)
 
-    # ============================================================
     # 轴向拉力 — 各层贡献表
-    # ============================================================
     st.subheader("轴向拉力 — 各层贡献")
     fu_rows = []
     for i, l in enumerate(layers):
@@ -1957,6 +1845,77 @@ with exp_col3:
                     '值': [EA, EI, Kp, Fu, My, Fc]
                 }
                 pd.DataFrame(cur_metrics).to_excel(writer, sheet_name='当前截面指标', index=False)
+
+                # 刚度各层贡献（新增 sheet）
+                stiff_export_rows = []
+                for i, l in enumerate(layers):
+                    stiff_export_rows.append({
+                        "层": l['name'],
+                        "类型": l['type'],
+                        "EA贡献_N": EA_c[i] * ea_correction,
+                        "EA占比_%": ea_pct[i],
+                        "EI贡献_Nmm2": EI_c[i],
+                        "EI占比_%": ei_pct[i],
+                        "Kp贡献_N_per_mm": Kp_c[i],
+                        "Kp占比_%": kp_pct[i]
+                    })
+                pd.DataFrame(stiff_export_rows).to_excel(
+                    writer, sheet_name='刚度各层贡献', index=False)
+
+                # 弯曲屈服各层贡献
+                bend_export_rows = []
+                b_ctrl_dict_exp = {c['layer']: c for c in bending_cands}
+                for contrib in bending_contribs:
+                    layer_name = contrib['layer']
+                    cand = b_ctrl_dict_exp.get(layer_name, {})
+                    bend_export_rows.append({
+                        "层": layer_name,
+                        "轴向模量_MPa": cand.get('E_z', 0),
+                        "外半径_mm": cand.get('r_out', 0),
+                        "抗拉强度_MPa": cand.get('sigma_uts', 0),
+                        "该层屈服时整体弯矩_Nmm": cand.get('M_y', 0),
+                        "整体屈服时该层承担弯矩_Nmm": contrib['M_actual'],
+                        "占比_%": contrib['pct'],
+                        "是否控制层": "★" if contrib['is_ctrl'] else ""
+                    })
+                pd.DataFrame(bend_export_rows).to_excel(
+                    writer, sheet_name='弯曲屈服各层贡献', index=False)
+
+                # 压扁屈服各层贡献
+                coll_export_rows = []
+                c_ctrl_dict_exp = {c['layer']: c for c in collapse_cands}
+                for contrib in collapse_contribs:
+                    layer_name = contrib['layer']
+                    cand = c_ctrl_dict_exp.get(layer_name, {})
+                    E_theta_v = cand.get('E_theta', 0)
+                    sigma_v = cand.get('sigma_uts', 0)
+                    coll_export_rows.append({
+                        "层": layer_name,
+                        "环向模量_MPa": E_theta_v,
+                        "壁厚_mm": cand.get('t', 0),
+                        "抗拉强度_MPa": sigma_v,
+                        "屈服应变_%": (sigma_v / E_theta_v * 100) if E_theta_v > 0 else 0,
+                        "该层屈服时整体受力_N": cand.get('F_c', 0),
+                        "整体屈服时该层承担弯矩_Nmm": contrib['M_actual'],
+                        "占比_%": contrib['pct'],
+                        "是否控制层": "★" if contrib['is_ctrl'] else ""
+                    })
+                pd.DataFrame(coll_export_rows).to_excel(
+                    writer, sheet_name='压扁屈服各层贡献', index=False)
+
+                # 轴向拉力各层贡献
+                fu_export_rows = []
+                for i, l in enumerate(layers):
+                    fu_export_rows.append({
+                        "层": l['name'],
+                        "类型": l['type'],
+                        "抗拉强度_MPa": l['sigma_uts'],
+                        "丝材_弹簧贡献_N": l.get('Fu_fiber', 0.0),
+                        "热熔填充贡献_N": l.get('Fu_matrix', 0.0),
+                        "合计_N": Fu_layer[i]
+                    })
+                pd.DataFrame(fu_export_rows).to_excel(
+                    writer, sheet_name='轴向拉力各层贡献', index=False)
 
                 dD_export = np.linspace(0, 2.0, 200)
                 F_lin_export = Kp * dD_export
