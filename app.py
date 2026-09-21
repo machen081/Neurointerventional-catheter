@@ -125,7 +125,7 @@ def normalize_structure(structure):
     return structure
 
 # ==================== 会话状态 ====================
-CURRENT_VERSION = "v22_compare"
+CURRENT_VERSION = "v23_label_params"
 
 if 'structure_version' not in st.session_state or st.session_state.structure_version != CURRENT_VERSION:
     st.session_state.structure = create_default_structure()
@@ -137,7 +137,7 @@ if 'structure_version' not in st.session_state or st.session_state.structure_ver
     st.session_state.span_L = 30.0
     st.session_state.eta_bond = 0.8
     st.session_state.softening_c = 1.0
-    st.session_state.saved_schemes = []   # 多方案存储
+    st.session_state.saved_schemes = []
 else:
     st.session_state.structure = normalize_structure(st.session_state.structure)
 
@@ -636,7 +636,7 @@ with st.sidebar:
                 layer['data'],
                 num_rows="dynamic",
                 use_container_width=True,
-                key=f"data_{i}_v22"
+                key=f"data_{i}_v23"
             )
             if edited is not None and not edited.empty:
                 layer['data'] = edited.copy()
@@ -705,7 +705,6 @@ with st.sidebar:
                 'softening_c': softening_c,
                 'span_L': span_L
             }
-            # 同名则覆盖
             existing_idx = None
             for idx, s in enumerate(st.session_state.saved_schemes):
                 if s['name'] == scheme_name:
@@ -723,13 +722,12 @@ with st.sidebar:
             st.session_state.saved_schemes = []
             st.rerun()
 
-    # 显示已保存方案列表
     if st.session_state.saved_schemes:
         st.markdown(f"**已保存 {len(st.session_state.saved_schemes)} 个方案：**")
         for idx, s in enumerate(st.session_state.saved_schemes):
             col_name, col_load, col_del = st.columns([3, 1, 1])
             with col_name:
-                st.caption(f"{idx+1}. {s['name']}")
+                st.caption(f"{idx+1}. {s['name']} (Kp_corr={s['kp_correction']:.2f}, c={s['softening_c']:.2f})")
             with col_load:
                 if st.button("载入", key=f"load_scheme_{idx}"):
                     st.session_state.structure = copy.deepcopy(s['structure'])
@@ -739,7 +737,6 @@ with st.sidebar:
                     st.session_state.eta_bond = s['eta_bond']
                     st.session_state.softening_c = s['softening_c']
                     st.session_state.span_L = s['span_L']
-                    # 清理 widget key
                     for k in list(st.session_state.keys()):
                         if k.startswith("data_") or k.startswith("name_") or k.startswith("type_"):
                             del st.session_state[k]
@@ -779,65 +776,46 @@ st.caption(
     "轴向刚度 EA: N | 弯曲刚度 EI: N·mm² | 抗压扁刚度 Kp: N/mm | 力矩 My: N·mm"
 )
 
-# ============================================================
-# 📖 使用说明书
-# ============================================================
 with st.expander("📖 使用说明书（点击展开）", expanded=False):
     st.markdown("""
 # 一、工具概览
 
 本工具用于微导管多层结构的**刚度**和**强度**分析，支持**多方案对比**。
 
-- **刚度**：EA 轴向、EI 弯曲、Kp 抗压扁
-- **强度**：Fu 轴向拉力、My 弯曲屈服、Fc 压扁屈服
-
 ---
 
-# 二、单位约定
+# 二、多方案对比
 
-| 物理量 | 单位 |
-|---|---|
-| 长度、半径、壁厚、跨距 | mm |
-| 弹性模量、抗拉强度 | MPa |
-| 力、轴向刚度 EA | N |
-| 弯曲刚度 EI | N·mm² |
-| 抗压扁刚度 Kp | N/mm |
-| 力矩 My | N·mm |
-
----
-
-# 三、材料库使用
-
-每层编辑区顶部有"📚 材料库"下拉菜单：
-
-1. **选择材料**
-2. **选择应用范围**：`🎯 全部段` 或 `第 N 段`
-3. **点击"填入"**：将材料参数写入指定范围
-
----
-
-# 四、多方案对比
-
-## 4.1 使用流程
+## 2.1 使用流程
 
 1. 配置好一个方案后，在侧边栏"💾 方案管理"中输入**方案名称**
 2. 点击"保存当前方案"
-3. 修改参数或切换到其他结构，再保存为第二个方案
+3. 修改参数或切换结构，再保存为第二个方案
 4. 主区域的所有曲线图会**自动叠加显示**所有已保存方案
 
-## 4.2 图例说明
+## 2.2 图例解读
 
-- **粗实线**：当前方案的曲线
-- **细虚线**：已保存方案的曲线
-- 不同颜色代表不同方案
+**每条曲线的图例中会显示该方案的关键参数**：
 
-## 4.3 方案管理
+- 当前方案：`Current (Kp_corr=X.XX, c=X.XX)`
+- 已保存方案：`方案名 (Kp_corr=X.XX, c=X.XX)`
 
-- **载入**：把保存的方案恢复到当前配置
-- **删除**：删除单个方案
-- **清空所有方案**：一键删除全部
+这样对比时可以直接看出**参数差异在哪里**。
 
-## 4.4 典型用途
+## 2.3 关键机制：方案是"快照"
+
+**保存方案时，程序会冻结当时的**：
+
+- 结构（层参数、分段）
+- EA 修正系数
+- Kp 修正系数
+- 粘接系数 η
+- **软化系数 c**
+- 跨距 L
+
+**保存后修改这些参数，不会同步到已保存的方案**。这是设计如此，方便对比历史版本。
+
+## 2.4 典型用途
 
 - **设计选型**：对比不同材料、编织密度、弹簧圈螺距的刚度差异
 - **竞品对标**：录入竞品结构，和自己的方案放在一起看
@@ -845,7 +823,7 @@ with st.expander("📖 使用说明书（点击展开）", expanded=False):
 
 ---
 
-# 五、刚度分析
+# 三、刚度分析
 
 | 指标 | 物理意义 |
 |---|---|
@@ -855,13 +833,13 @@ with st.expander("📖 使用说明书（点击展开）", expanded=False):
 
 ---
 
-# 六、非线性力-位移曲线
+# 四、非线性力-位移曲线
 
-## 6.1 模型
+## 4.1 模型
 
 $$F(\\Delta D) = \\frac{K_p \\cdot \\Delta D}{1 + c \\cdot \\Delta D / D_{outer}}$$
 
-## 6.2 软化系数 c
+## 4.2 软化系数 c
 
 | c 值 | 行为 |
 |---|---|
@@ -870,14 +848,15 @@ $$F(\\Delta D) = \\frac{K_p \\cdot \\Delta D}{1 + c \\cdot \\Delta D / D_{outer}
 | 1.0 | 中等软化（默认） |
 | 3.0 | 强软化 |
 
-## 6.3 标定顺序
+## 4.3 三条曲线的含义
 
-1. 先用 Kp 修正系数对齐**小变形段**
-2. 再用 c 调整**大变形段的弯曲程度**
+- **灰色虚线**：当前方案的线弹性外推（基准对比）
+- **红色实线**：当前方案的非线性模型
+- **其他颜色虚线**：已保存方案的非线性模型
 
 ---
 
-# 七、强度分析
+# 五、强度分析
 
 | 指标 | 物理意义 |
 |---|---|
@@ -889,55 +868,39 @@ $$F(\\Delta D) = \\frac{K_p \\cdot \\Delta D}{1 + c \\cdot \\Delta D / D_{outer}
 
 **压扁屈服控制层**：ε_y,i = σ_uts,i / E_θ,i，最小者控制。
 
-**轴向拉力**：弹簧圈/编织层的 Fu = 丝材贡献 + 热熔填充贡献（含 η 折减）。
-
 ---
 
-# 八、修正系数
+# 六、修正系数
 
-## 刚度修正系数
-
-| 因素 | 典型折减 |
+| 系数 | 作用 |
 |---|---|
-| 有效模量偏低 | 0.3~0.5 |
-| 几何非线性 | 0.3~0.6 |
-| 材料屈服 | 载荷越大折减越明显 |
-
-**实验值通常是理论值的 30%~50%。**
-
-## 抗拉粘接系数 η
-
-- η = 1.0：完全粘接
-- η = 0.5：明显滑移
-- η = 0.8：默认（机械互锁）
+| **EA 修正** | 补偿有效模量偏低、层间效应 |
+| **Kp 修正** | 补偿抗压扁模型简化 |
+| **粘接系数 η** | 热熔填充与丝材的粘接程度 |
+| **软化系数 c** | 非线性力-位移曲线的弯曲程度 |
 
 ---
 
-# 九、导出功能
-
-- **📄 当前截面参数表 (CSV)**
-- **📈 沿长度曲线数据 (CSV)**
-- **📊 完整报告 (Excel)**：含力-位移曲线 sheet
-
----
-
-# 十、常见问题
+# 七、常见问题
 
 **Q1：多条曲线颜色看不清？**
-A：方案数量多时，建议在"方案管理"里删除不需要的，只保留 3~5 个对比。
+A：方案数多时，建议只保留 3~5 个对比。从侧边栏删除不需要的。
 
-**Q2：c 应该填多少？**
+**Q2：为什么两个方案的曲线不一样？**
+A：检查图例里的参数（Kp_corr、c）。方案是快照，保存时的参数可能和现在不同。
+
+**Q3：c 应该填多少？**
 A：没有实验时，默认 1.0。做过实验后，调 c 让曲线形状与实测接近。
 
-**Q3：改了参数图表没更新？**
+**Q4：改了参数图表没更新？**
 A：按一次 Enter，或点「🔄 强制刷新计算」。
 
-**Q4：Excel 导出报错？**
+**Q5：Excel 导出报错？**
 A：需要安装 openpyxl。
 
 ---
 
-# 十一、局限
+# 八、局限
 
 | 场景 | 是否适用 |
 |---|---|
@@ -967,14 +930,31 @@ x_pos = st.slider("Axial position x (mm)", min_value=0.0, max_value=L_total,
                   value=x_pos_safe, step=0.5)
 st.session_state.x_pos = x_pos
 
-# 计算所有方案（当前 + 已保存）
-# 每个元素: (name, xs, EA_arr, EI_arr, Kp_arr, Fu_arr, My_arr, Fc_arr, is_current)
+# ============================================================
+# 计算所有方案（当前 + 已保存），用 dict 存储，便于在 label 中显示参数
+# ============================================================
 all_schemes = []
 
 # 当前方案
 xs, EA_arr, EI_arr, Kp_arr, Fu_arr, My_arr, Fc_arr = compute_along_length(
     structure, L_total, ea_correction, kp_correction, eta_bond)
-all_schemes.append(("Current", xs, EA_arr, EI_arr, Kp_arr, Fu_arr, My_arr, Fc_arr, True))
+all_schemes.append({
+    'name': 'Current',
+    'xs': xs,
+    'EA': EA_arr, 'EI': EI_arr, 'Kp': Kp_arr,
+    'Fu': Fu_arr, 'My': My_arr, 'Fc': Fc_arr,
+    'is_current': True,
+    'params': {
+        'name': 'Current',
+        'structure': structure,
+        'L_total': L_total,
+        'ea_correction': ea_correction,
+        'kp_correction': kp_correction,
+        'eta_bond': eta_bond,
+        'softening_c': softening_c,
+        'span_L': L_span,
+    }
+})
 
 # 已保存方案
 for s in saved_schemes:
@@ -982,7 +962,14 @@ for s in saved_schemes:
         s_xs, s_EA, s_EI, s_Kp, s_Fu, s_My, s_Fc = compute_along_length(
             s['structure'], s['L_total'],
             s['ea_correction'], s['kp_correction'], s['eta_bond'])
-        all_schemes.append((s['name'], s_xs, s_EA, s_EI, s_Kp, s_Fu, s_My, s_Fc, False))
+        all_schemes.append({
+            'name': s['name'],
+            'xs': s_xs,
+            'EA': s_EA, 'EI': s_EI, 'Kp': s_Kp,
+            'Fu': s_Fu, 'My': s_My, 'Fc': s_Fc,
+            'is_current': False,
+            'params': s,
+        })
     except Exception as e:
         st.warning(f"方案 '{s['name']}' 计算失败：{e}")
 
@@ -990,6 +977,18 @@ for s in saved_schemes:
 scheme_colors = plt.cm.tab10(np.linspace(0, 1, max(len(all_schemes), 1)))
 
 layers = compute_at_x(structure, x_pos, eta_bond=eta_bond)
+
+# ============================================================
+# 辅助：生成带参数的 label
+# ============================================================
+def make_label(sch):
+    p = sch['params']
+    kp_c = p['kp_correction']
+    c_v = p['softening_c']
+    if sch['is_current']:
+        return f"Current (Kp_corr={kp_c:.2f}, c={c_v:.2f})"
+    else:
+        return f"{sch['name']} (Kp_corr={kp_c:.2f}, c={c_v:.2f})"
 
 # ============================================================
 # 第一部分：刚度分析
@@ -1009,19 +1008,20 @@ else:
 
     st.subheader("Stiffness along Length")
     if len(all_schemes) > 1:
-        st.caption(f"当前方案 + {len(all_schemes)-1} 个已保存方案叠加显示。当前方案粗实线，其余细虚线。")
+        st.caption(f"当前方案 + {len(all_schemes)-1} 个已保存方案叠加显示。"
+                   f"图例中显示每个方案的 Kp 修正系数和软化系数 c。")
     fig_s, axes_s = plt.subplots(3, 1, figsize=(10, 12))
     fig_s.suptitle("Stiffness Distribution along Catheter Length", y=0.98, fontsize=13)
 
-    # 叠加所有方案
-    for si, (sname, s_xs, s_EA, s_EI, s_Kp, s_Fu, s_My, s_Fc, is_cur) in enumerate(all_schemes):
+    for si, sch in enumerate(all_schemes):
         color = scheme_colors[si]
-        lw = 2.5 if is_cur else 1.5
-        ls = '-' if is_cur else '--'
-        label_s = f"{sname}" + (" (current)" if is_cur else "")
-        axes_s[0].plot(s_xs, s_EA, color=color, linewidth=lw, linestyle=ls, label=label_s)
-        axes_s[1].plot(s_xs, s_EI, color=color, linewidth=lw, linestyle=ls, label=label_s)
-        axes_s[2].plot(s_xs, s_Kp, color=color, linewidth=lw, linestyle=ls, label=label_s)
+        lw = 2.5 if sch['is_current'] else 1.5
+        ls = '-' if sch['is_current'] else '--'
+        label_s = make_label(sch)
+
+        axes_s[0].plot(sch['xs'], sch['EA'], color=color, linewidth=lw, linestyle=ls, label=label_s)
+        axes_s[1].plot(sch['xs'], sch['EI'], color=color, linewidth=lw, linestyle=ls, label=label_s)
+        axes_s[2].plot(sch['xs'], sch['Kp'], color=color, linewidth=lw, linestyle=ls, label=label_s)
 
     axes_s[0].set_ylabel('EA (N)')
     axes_s[0].set_xlabel('Axial position (mm)')
@@ -1037,7 +1037,7 @@ else:
 
     axes_s[2].set_ylabel('Kp (N/mm)')
     axes_s[2].set_xlabel('Axial position (mm)')
-    axes_s[2].set_title(f'Crush Stiffness (correction × {kp_correction:.3f})')
+    axes_s[2].set_title(f'Crush Stiffness (current correction × {kp_correction:.3f})')
     axes_s[2].grid(True); axes_s[2].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
     axes_s[2].legend(loc='best', fontsize=8)
 
@@ -1064,30 +1064,32 @@ else:
 
     fig_cd, ax_cd = plt.subplots(figsize=(10, 6))
 
-    # 已保存方案的非线性曲线（细虚线）
-    for si, (sname, s_xs, s_EA, s_EI, s_Kp, s_Fu, s_My, s_Fc, is_cur) in enumerate(all_schemes):
-        if is_cur:
+    # 已保存方案的非线性曲线（带 Kp 和 c 参数）
+    for si, sch in enumerate(all_schemes):
+        if sch['is_current']:
             continue
         try:
-            # 用方案在其当前 x 位置（假设是相同的 x_pos）的 Kp
-            s_layers = compute_at_x(saved_schemes[si-1]['structure'], x_pos,
-                                    eta_bond=saved_schemes[si-1]['eta_bond'])
+            s_params = sch['params']
+            s_layers = compute_at_x(s_params['structure'], x_pos,
+                                    eta_bond=s_params['eta_bond'])
             if s_layers:
                 s_Kp_val, _, _, _, _, _, _, _ = compute_stiffness(
-                    s_layers, saved_schemes[si-1]['ea_correction'],
-                    saved_schemes[si-1]['kp_correction'])
+                    s_layers, s_params['ea_correction'], s_params['kp_correction'])
                 s_D_outer = 2 * max(l['r_out'] for l in s_layers)
+                s_c = s_params['softening_c']
                 s_F_nl = compute_crush_force_nonlinear(
-                    s_Kp_val, s_D_outer, dD_range, saved_schemes[si-1]['softening_c'])
+                    s_Kp_val, s_D_outer, dD_range, s_c)
+                label_s = f"{sch['name']} (Kp={s_Kp_val:.2f} N/mm, c={s_c:.2f})"
                 ax_cd.plot(dD_range, s_F_nl, color=scheme_colors[si],
-                           linewidth=1.5, linestyle='--', label=f"{sname}")
+                           linewidth=1.5, linestyle='--', label=label_s)
         except Exception:
             pass
 
-    ax_cd.plot(dD_range, F_linear, '--', color='gray', linewidth=1.8,
-               label=f'Current: Linear extrapolation')
-    ax_cd.plot(dD_range, F_nonlinear, 'r-', linewidth=2.5,
-               label=f'Current: Non-linear (c={softening_c:.2f})')
+    # 当前方案的线性和非线性
+    label_lin = f"Current: Linear (Kp={Kp:.2f} N/mm)"
+    label_nl = f"Current: Non-linear (Kp={Kp:.2f} N/mm, c={softening_c:.2f})"
+    ax_cd.plot(dD_range, F_linear, '--', color='gray', linewidth=1.8, label=label_lin)
+    ax_cd.plot(dD_range, F_nonlinear, 'r-', linewidth=2.5, label=label_nl)
 
     for dD_mark, color in [(1.0, 'blue'), (2.0, 'darkgreen')]:
         if dD_mark <= dD_max:
@@ -1160,37 +1162,35 @@ else:
     if len(all_schemes) > 1:
         st.markdown("---")
         st.subheader("📊 方案对比（当前截面）")
-        st.caption(f"x = {x_pos:.1f} mm 处所有方案的六项指标对比")
+        st.caption(f"x = {x_pos:.1f} mm 处所有方案的六项指标对比，含关键参数")
 
         compare_rows = []
-        # 当前方案
-        compare_rows.append({
-            'Scheme': 'Current',
-            'EA (N)': f"{EA:.2f}",
-            'EI (N·mm²)': f"{EI:.2f}",
-            'Kp (N/mm)': f"{Kp:.2f}",
-            'Fu (N)': f"{compute_axial_strength(layers)[0]:.2f}",
-            'My (N·mm)': f"{compute_bending_yield(layers)[0]:.4f}",
-            'Fc (N)': f"{compute_collapse_force(layers)[0]:.2f}"
-        })
-        # 已保存方案
-        for s in saved_schemes:
+        for sch in all_schemes:
+            p = sch['params']
             try:
-                s_layers = compute_at_x(s['structure'], x_pos, eta_bond=s['eta_bond'])
-                if s_layers:
-                    s_EA, s_EI, s_Kp, _, _, _, _, _ = compute_stiffness(
-                        s_layers, s['ea_correction'], s['kp_correction'])
-                    s_Fu, _ = compute_axial_strength(s_layers)
-                    s_My, _, _ = compute_bending_yield(s_layers)
-                    s_Fc, _, _ = compute_collapse_force(s_layers)
+                if sch['is_current']:
+                    s_layers_cmp = layers
+                else:
+                    s_layers_cmp = compute_at_x(p['structure'], x_pos,
+                                                eta_bond=p['eta_bond'])
+                if s_layers_cmp:
+                    s_EA_x, s_EI_x, s_Kp_x, _, _, _, _, _ = compute_stiffness(
+                        s_layers_cmp, p['ea_correction'], p['kp_correction'])
+                    s_Fu_x, _ = compute_axial_strength(s_layers_cmp)
+                    s_My_x, _, _ = compute_bending_yield(s_layers_cmp)
+                    s_Fc_x, _, _ = compute_collapse_force(s_layers_cmp)
+                    scheme_label = sch['name'] + (' (current)' if sch['is_current'] else '')
                     compare_rows.append({
-                        'Scheme': s['name'],
-                        'EA (N)': f"{s_EA:.2f}",
-                        'EI (N·mm²)': f"{s_EI:.2f}",
-                        'Kp (N/mm)': f"{s_Kp:.2f}",
-                        'Fu (N)': f"{s_Fu:.2f}",
-                        'My (N·mm)': f"{s_My:.4f}",
-                        'Fc (N)': f"{s_Fc:.2f}"
+                        'Scheme': scheme_label,
+                        'Kp_corr': f"{p['kp_correction']:.2f}",
+                        'c': f"{p['softening_c']:.2f}",
+                        'η': f"{p['eta_bond']:.2f}",
+                        'EA (N)': f"{s_EA_x:.2f}",
+                        'EI (N·mm²)': f"{s_EI_x:.2f}",
+                        'Kp (N/mm)': f"{s_Kp_x:.2f}",
+                        'Fu (N)': f"{s_Fu_x:.2f}",
+                        'My (N·mm)': f"{s_My_x:.4f}",
+                        'Fc (N)': f"{s_Fc_x:.2f}"
                     })
             except Exception:
                 pass
@@ -1293,14 +1293,15 @@ if layers:
     fig_t, axes_t = plt.subplots(3, 1, figsize=(10, 12))
     fig_t.suptitle("Strength Distribution along Catheter Length", y=0.98, fontsize=13)
 
-    for si, (sname, s_xs, s_EA, s_EI, s_Kp, s_Fu, s_My, s_Fc, is_cur) in enumerate(all_schemes):
+    for si, sch in enumerate(all_schemes):
         color = scheme_colors[si]
-        lw = 2.5 if is_cur else 1.5
-        ls = '-' if is_cur else '--'
-        label_s = f"{sname}" + (" (current)" if is_cur else "")
-        axes_t[0].plot(s_xs, s_Fu, color=color, linewidth=lw, linestyle=ls, label=label_s)
-        axes_t[1].plot(s_xs, s_My, color=color, linewidth=lw, linestyle=ls, label=label_s)
-        axes_t[2].plot(s_xs, s_Fc, color=color, linewidth=lw, linestyle=ls, label=label_s)
+        lw = 2.5 if sch['is_current'] else 1.5
+        ls = '-' if sch['is_current'] else '--'
+        label_s = make_label(sch)
+
+        axes_t[0].plot(sch['xs'], sch['Fu'], color=color, linewidth=lw, linestyle=ls, label=label_s)
+        axes_t[1].plot(sch['xs'], sch['My'], color=color, linewidth=lw, linestyle=ls, label=label_s)
+        axes_t[2].plot(sch['xs'], sch['Fc'], color=color, linewidth=lw, linestyle=ls, label=label_s)
 
     axes_t[0].set_ylabel('Fu (N)')
     axes_t[0].set_xlabel('Axial position (mm)')
@@ -1308,12 +1309,11 @@ if layers:
     axes_t[0].grid(True); axes_t[0].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
     axes_t[0].legend(loc='best', fontsize=8)
 
-    ax_my = axes_t[1]
-    ax_my.set_ylabel('My (N·mm)')
-    ax_my.set_xlabel('Axial position (mm)')
-    ax_my.set_title('Bending Yield Moment')
-    ax_my.grid(True); ax_my.axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
-    ax_my.legend(loc='best', fontsize=8)
+    axes_t[1].set_ylabel('My (N·mm)')
+    axes_t[1].set_xlabel('Axial position (mm)')
+    axes_t[1].set_title('Bending Yield Moment')
+    axes_t[1].grid(True); axes_t[1].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
+    axes_t[1].legend(loc='best', fontsize=8)
 
     axes_t[2].set_ylabel('Fc (N)')
     axes_t[2].set_xlabel('Axial position (mm)')
@@ -1474,25 +1474,25 @@ with exp_col3:
             # 方案对比
             if len(all_schemes) > 1:
                 compare_rows_export = []
-                for si, (sname, s_xs, s_EA, s_EI, s_Kp, s_Fu, s_My, s_Fc, is_cur) in enumerate(all_schemes):
-                    # 在 x_pos 处的值
+                for sch in all_schemes:
+                    p = sch['params']
                     try:
-                        if is_cur:
+                        if sch['is_current']:
                             s_layers_export = layers
-                            s_EA_x, s_EI_x, s_Kp_x, _, _, _, _, _ = compute_stiffness(
-                                layers, ea_correction, kp_correction)
                         else:
-                            s_obj = saved_schemes[si-1]
-                            s_layers_export = compute_at_x(s_obj['structure'], x_pos,
-                                                          eta_bond=s_obj['eta_bond'])
-                            s_EA_x, s_EI_x, s_Kp_x, _, _, _, _, _ = compute_stiffness(
-                                s_layers_export, s_obj['ea_correction'], s_obj['kp_correction'])
+                            s_layers_export = compute_at_x(p['structure'], x_pos,
+                                                          eta_bond=p['eta_bond'])
                         if s_layers_export:
+                            s_EA_x, s_EI_x, s_Kp_x, _, _, _, _, _ = compute_stiffness(
+                                s_layers_export, p['ea_correction'], p['kp_correction'])
                             s_Fu_x, _ = compute_axial_strength(s_layers_export)
                             s_My_x, _, _ = compute_bending_yield(s_layers_export)
                             s_Fc_x, _, _ = compute_collapse_force(s_layers_export)
                             compare_rows_export.append({
-                                'Scheme': sname + (' (current)' if is_cur else ''),
+                                'Scheme': sch['name'] + (' (current)' if sch['is_current'] else ''),
+                                'Kp_correction': p['kp_correction'],
+                                'softening_c': p['softening_c'],
+                                'eta_bond': p['eta_bond'],
                                 'EA_N': s_EA_x,
                                 'EI_N_mm2': s_EI_x,
                                 'Kp_N_per_mm': s_Kp_x,
