@@ -125,7 +125,7 @@ def normalize_structure(structure):
     return structure
 
 # ==================== 会话状态 ====================
-CURRENT_VERSION = "v23_label_params"
+CURRENT_VERSION = "v24_fix_kp_unpack"
 
 if 'structure_version' not in st.session_state or st.session_state.structure_version != CURRENT_VERSION:
     st.session_state.structure = create_default_structure()
@@ -379,6 +379,7 @@ def compute_wall_axial_stiffness(E_theta, r_in, r_out):
 
 # ==================== 刚度计算 ====================
 def compute_stiffness(layers, ea_corr=1.0, kp_corr=1.0):
+    """返回顺序：EA, EI, Kp, EA_c, EI_c, Kp_c, model_used, thick_ratio"""
     EA_c, EI_c = [], []
     EI_theta_bend_c, EA_theta_c = [], []
 
@@ -636,7 +637,7 @@ with st.sidebar:
                 layer['data'],
                 num_rows="dynamic",
                 use_container_width=True,
-                key=f"data_{i}_v23"
+                key=f"data_{i}_v24"
             )
             if edited is not None and not edited.empty:
                 layer['data'] = edited.copy()
@@ -884,7 +885,7 @@ $$F(\\Delta D) = \\frac{K_p \\cdot \\Delta D}{1 + c \\cdot \\Delta D / D_{outer}
 # 七、常见问题
 
 **Q1：多条曲线颜色看不清？**
-A：方案数多时，建议只保留 3~5 个对比。从侧边栏删除不需要的。
+A：方案数多时，建议只保留 3~5 个对比。
 
 **Q2：为什么两个方案的曲线不一样？**
 A：检查图例里的参数（Kp_corr、c）。方案是快照，保存时的参数可能和现在不同。
@@ -931,11 +932,10 @@ x_pos = st.slider("Axial position x (mm)", min_value=0.0, max_value=L_total,
 st.session_state.x_pos = x_pos
 
 # ============================================================
-# 计算所有方案（当前 + 已保存），用 dict 存储，便于在 label 中显示参数
+# 计算所有方案（当前 + 已保存）
 # ============================================================
 all_schemes = []
 
-# 当前方案
 xs, EA_arr, EI_arr, Kp_arr, Fu_arr, My_arr, Fc_arr = compute_along_length(
     structure, L_total, ea_correction, kp_correction, eta_bond)
 all_schemes.append({
@@ -956,7 +956,6 @@ all_schemes.append({
     }
 })
 
-# 已保存方案
 for s in saved_schemes:
     try:
         s_xs, s_EA, s_EI, s_Kp, s_Fu, s_My, s_Fc = compute_along_length(
@@ -973,14 +972,10 @@ for s in saved_schemes:
     except Exception as e:
         st.warning(f"方案 '{s['name']}' 计算失败：{e}")
 
-# 颜色分配
 scheme_colors = plt.cm.tab10(np.linspace(0, 1, max(len(all_schemes), 1)))
 
 layers = compute_at_x(structure, x_pos, eta_bond=eta_bond)
 
-# ============================================================
-# 辅助：生成带参数的 label
-# ============================================================
 def make_label(sch):
     p = sch['params']
     kp_c = p['kp_correction']
@@ -1065,6 +1060,7 @@ else:
     fig_cd, ax_cd = plt.subplots(figsize=(10, 6))
 
     # 已保存方案的非线性曲线（带 Kp 和 c 参数）
+    # ★ 关键修复：解包顺序正确取 Kp（第 3 个返回值）
     for si, sch in enumerate(all_schemes):
         if sch['is_current']:
             continue
@@ -1073,7 +1069,8 @@ else:
             s_layers = compute_at_x(s_params['structure'], x_pos,
                                     eta_bond=s_params['eta_bond'])
             if s_layers:
-                s_Kp_val, _, _, _, _, _, _, _ = compute_stiffness(
+                # ★ 修复点：Kp 是 compute_stiffness 的第 3 个返回值
+                _, _, s_Kp_val, _, _, _, _, _ = compute_stiffness(
                     s_layers, s_params['ea_correction'], s_params['kp_correction'])
                 s_D_outer = 2 * max(l['r_out'] for l in s_layers)
                 s_c = s_params['softening_c']
@@ -1471,7 +1468,6 @@ with exp_col3:
 
             curve_df.to_excel(writer, sheet_name='沿长度曲线', index=False)
 
-            # 方案对比
             if len(all_schemes) > 1:
                 compare_rows_export = []
                 for sch in all_schemes:
