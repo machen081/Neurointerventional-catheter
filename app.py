@@ -124,7 +124,7 @@ def normalize_structure(structure):
     return structure
 
 # ==================== 会话状态 ====================
-CURRENT_VERSION = "v20_nonlinear_crush"
+CURRENT_VERSION = "v21_en_plot"
 
 if 'structure_version' not in st.session_state or st.session_state.structure_version != CURRENT_VERSION:
     st.session_state.structure = create_default_structure()
@@ -490,14 +490,6 @@ def compute_collapse_force(layers):
 
 # ==================== 非线性力-位移模型 ====================
 def compute_crush_force_nonlinear(Kp, D_outer, dD, c=1.0):
-    """
-    非线性力-位移模型：
-      F(ΔD) = Kp · ΔD / (1 + c · ΔD / D_outer)
-
-    - ΔD 小时：F ≈ Kp · ΔD（线性）
-    - ΔD 大时：F 趋于上限 Kp · D_outer / c（软化）
-    - c = 0：退化为完全线性
-    """
     if D_outer <= 0:
         return Kp * dD
     dD = np.asarray(dD)
@@ -641,7 +633,7 @@ with st.sidebar:
                 layer['data'],
                 num_rows="dynamic",
                 use_container_width=True,
-                key=f"data_{i}_v20"
+                key=f"data_{i}_v21"
             )
             if edited is not None and not edited.empty:
                 layer['data'] = edited.copy()
@@ -795,7 +787,7 @@ with st.expander("📖 使用说明书（点击展开）", expanded=False):
 
 ---
 
-# 五、非线性力-位移曲线（重点）
+# 五、非线性力-位移曲线
 
 ## 5.1 为什么需要非线性模型
 
@@ -1019,15 +1011,14 @@ else:
     # ============================================================
     st.subheader("Crush Force–Displacement Curve (Non-linear)")
     st.caption(
-        f"当前截面 Kp = {Kp:.3f} N/mm（已应用修正系数 {kp_correction:.3f}）。"
-        f"软化系数 c = {softening_c:.2f}。"
-        f"非线性模型：F = Kp·ΔD / (1 + c·ΔD/D)。"
+        f"Current section Kp = {Kp:.3f} N/mm (with correction factor {kp_correction:.3f}). "
+        f"Softening coefficient c = {softening_c:.2f}. "
+        f"Non-linear model: F = Kp·ΔD / (1 + c·ΔD/D)."
     )
 
     r_outer_max = max(l['r_out'] for l in layers)
     D_outer = 2 * r_outer_max
 
-    # 曲线数据
     dD_max = 2.0
     dD_range = np.linspace(0, dD_max, 300)
     F_linear = Kp * dD_range
@@ -1035,34 +1026,28 @@ else:
 
     fig_cd, ax_cd = plt.subplots(figsize=(10, 6))
 
-    # 线弹性外推（灰色虚线，作为对比基准）
     ax_cd.plot(dD_range, F_linear, '--', color='gray', linewidth=1.8,
                label=f'Linear extrapolation (F = Kp·ΔD)')
 
-    # 非线性曲线（红色实线）
     ax_cd.plot(dD_range, F_nonlinear, 'r-', linewidth=2.5,
                label=f'Non-linear model (c = {softening_c:.2f})')
 
-    # 标注 1mm 和 2mm
     for dD_mark, color in [(1.0, 'blue'), (2.0, 'darkgreen')]:
         if dD_mark <= dD_max:
             F_lin_mark = Kp * dD_mark
             F_nl_mark = compute_crush_force_nonlinear(Kp, D_outer, dD_mark, softening_c)
 
-            # 非线性点
             ax_cd.plot(dD_mark, F_nl_mark, marker='o', markersize=11, color=color,
                        markeredgecolor='white', markeredgewidth=1.5, zorder=5)
-            # 线性点（空心）
             ax_cd.plot(dD_mark, F_lin_mark, marker='o', markersize=8, color=color,
                        markerfacecolor='white', markeredgewidth=1.5, zorder=4)
 
-            # 注释文本
             delta_pct = (F_lin_mark - F_nl_mark) / F_lin_mark * 100 if F_lin_mark > 0 else 0
             ax_cd.annotate(
                 f'ΔD = {dD_mark:.1f} mm\n'
                 f'F (NL) = {F_nl_mark:.3f} N\n'
                 f'F (linear) = {F_lin_mark:.3f} N\n'
-                f'软化: -{delta_pct:.1f}%',
+                f'Softening: -{delta_pct:.1f}%',
                 xy=(dD_mark, F_nl_mark),
                 xytext=(dD_mark + 0.15, F_nl_mark + 0.05 * max(F_linear)),
                 fontsize=9.5,
@@ -1072,17 +1057,17 @@ else:
                 arrowprops=dict(arrowstyle='->', color=color, lw=1.2)
             )
 
-    # 完全压扁位置
     if D_outer <= dD_max:
         ax_cd.axvline(x=D_outer, color='gray', linestyle=':', alpha=0.7,
                       label=f'Full collapse (ΔD = D = {D_outer:.3f} mm)')
 
-    # 小变形线性区
+    # 小变形线性区（英文）
     dD_10 = 0.1 * D_outer
     if dD_10 < dD_max:
         ax_cd.axvspan(0, dD_10, alpha=0.08, color='green')
         ax_cd.text(dD_10 / 2, max(F_linear) * 0.05,
-                   '小变形\n线性区', ha='center', fontsize=9, color='green')
+                   'Small deformation\n(linear region)',
+                   ha='center', fontsize=9, color='green')
 
     ax_cd.set_xlabel('Diameter reduction ΔD (mm)')
     ax_cd.set_ylabel('Radial force F (N)')
@@ -1106,14 +1091,13 @@ else:
         delta_pct = (F_lin - F_nl) / F_lin * 100 if F_lin > 0 else 0
         table_rows.append({
             'ΔD (mm)': f"{dD_v:.1f}",
-            'ΔD / 外径': f"{dD_v / D_outer * 100:.1f}%" if D_outer > 0 else "—",
-            '线性 F (N)': f"{F_lin:.4f}",
-            '非线性 F (N)': f"{F_nl:.4f}",
-            '软化幅度': f"-{delta_pct:.1f}%"
+            'ΔD / Outer D': f"{dD_v / D_outer * 100:.1f}%" if D_outer > 0 else "—",
+            'Linear F (N)': f"{F_lin:.4f}",
+            'Non-linear F (N)': f"{F_nl:.4f}",
+            'Softening': f"-{delta_pct:.1f}%"
         })
     st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
 
-    # 提示
     st.info(
         f"**模型说明**：非线性模型 F = Kp·ΔD / (1 + c·ΔD/D) 中，"
         f"c 越大曲线越向下弯曲。当前 c = {softening_c:.2f}。"
@@ -1373,7 +1357,6 @@ with exp_col3:
                 }
                 pd.DataFrame(cur_metrics).to_excel(writer, sheet_name='当前截面指标', index=False)
 
-                # 力-位移曲线数据（含线性和非线性）
                 dD_export = np.linspace(0, 2.0, 200)
                 F_lin_export = Kp * dD_export
                 F_nl_export = compute_crush_force_nonlinear(Kp, D_outer, dD_export, softening_c)
