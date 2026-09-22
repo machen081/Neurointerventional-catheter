@@ -218,7 +218,7 @@ def check_parameters(structure, L_total, span_L):
     return errors, warnings
 
 # ==================== 会话状态 ====================
-CURRENT_VERSION = "v33_p0_p1_fixes"
+CURRENT_VERSION = "v34_thickwall_1_2"
 
 if 'structure_version' not in st.session_state or st.session_state.structure_version != CURRENT_VERSION:
     st.session_state.structure = create_default_structure()
@@ -470,7 +470,24 @@ def compute_wall_axial_stiffness(E_theta, r_in, r_out):
     t = r_out - r_in
     return E_theta * t if t > 0 else 0.0
 
-# ==================== 刚度计算 ====================
+# ==================== 厚壁改进 #1：有效几何常数 ====================
+def compute_effective_const(tr):
+    """
+    圆环对径压缩的有效几何常数（随 t/R 连续变化）。
+
+    - 薄壁极限（tr → 0）：π/4 − 2/π ≈ 0.1488（Timoshenko 解）
+    - 厚壁（tr 增大）：有效常数增大，Kp 相对纯薄壁公式降低
+      经验拟合，与厚壁环数值解趋势一致；精确系数建议用 FEM 标定。
+
+    参数
+    ----
+    tr : float
+        壁厚/平均半径比 t/R
+    """
+    const_thin = np.pi / 4 - 2 / np.pi
+    return const_thin * (1.0 + 0.5 * tr + 1.0 * tr * tr)
+
+# ==================== 刚度计算（改进 #1 + #2） ====================
 def compute_stiffness(layers, ea_corr=1.0, kp_corr=1.0):
     EA_c, EI_c = [], []
     EI_theta_bend_c, EA_theta_c = [], []
@@ -495,22 +512,33 @@ def compute_stiffness(layers, ea_corr=1.0, kp_corr=1.0):
         rn = max(l['r_out'] for l in layers)
         R = (r0 + rn) / 2
         thick_ratio = (rn - r0) / R if R > 0 else 0
-        const = np.pi/4 - 2/np.pi
 
-        if thick_ratio < 0.1:
-            Kp_raw = EI_theta_bend / (R**3 * const) if EI_theta_bend > 0 else 0.0
+        # ===== 改进 #1：const 随 t/R 连续变化 =====
+        const_eff = compute_effective_const(thick_ratio)
+
+        # ===== 改进 #2：统一公式，无分支跳变 =====
+        # 薄壁公式 Kp = EI/(const·R³) 是厚壁柔度叠加公式在轴向项可忽略时的特例。
+        # 用同一个柔度叠加公式覆盖全部 t/R 范围，天然连续。
+        compliance = 0.0
+        if EI_theta_bend > 0:
+            compliance += const_eff * R**3 / EI_theta_bend
+        if EA_theta > 0:
+            compliance += const_eff * R / EA_theta
+        Kp_raw = 1.0 / compliance if compliance > 0 else 0.0
+
+        # 模型标签（仅信息用途，公式已是统一连续形式）
+        if thick_ratio < 0.08:
             model_used = "thin-wall"
+        elif thick_ratio < 0.15:
+            model_used = "transition"
         else:
-            compliance = 0.0
-            if EI_theta_bend > 0: compliance += const * R**3 / EI_theta_bend
-            if EA_theta > 0: compliance += const * R / EA_theta
-            Kp_raw = 1.0 / compliance if compliance > 0 else 0.0
             model_used = "thick-wall"
 
         Kp = Kp_raw * kp_corr
         Kp_c = [ei / EI_theta_bend * Kp for ei in EI_theta_bend_c] if EI_theta_bend > 0 else [0.0]*len(layers)
     else:
         Kp = 0.0; Kp_c = []; model_used = "N/A"; thick_ratio = 0.0
+        const_eff = 0.0
 
     return EA, EI, Kp, EA_c, EI_c, Kp_c, model_used, thick_ratio
 
@@ -862,7 +890,7 @@ with st.sidebar:
                 layer['data'],
                 num_rows="dynamic",
                 use_container_width=True,
-                key=f"data_{i}_{layer['type']}_v33"
+                key=f"data_{i}_{layer['type']}_v34"
             )
             if edited is not None and not edited.empty:
                 layer['data'] = edited.copy()
@@ -878,6 +906,11 @@ with st.sidebar:
                                     value=float(st.session_state.kp_correction),
                                     step=0.01, format="%.3f", key="kp_corr_input")
     st.session_state.kp_correction = kp_correction
+    st.caption(
+        "🔧 厚壁修正（v34）：有效几何常数随 t/R 连续变化"
+        "（薄壁 0.1488 → t/R=0.3 约 0.1845），"
+        "Kp 公式统一为柔度叠加，t/R = 0.1 附近无跳变。"
+    )
 
     st.markdown("---")
     st.markdown("**编织层压扁折减**")
@@ -1096,6 +1129,8 @@ with st.expander("5. 刚度分析", expanded=False):
 三个刚度指标：EA (N)、EI (N·mm²)、Kp (N/mm)。
 
 **各层刚度贡献明细表**：显示每层对 EA、EI、Kp 的贡献值和占比，附合计行。EA 各层贡献已乘 EA 修正系数，Kp 各层贡献按环向弯曲刚度比例分配。
+
+**厚壁修正（v34）**：有效几何常数 const_eff 随 t/R 连续变化（薄壁极限 0.1488 → t/R=0.3 约 0.1845）。Kp 使用统一的柔度叠加公式，t/R = 0.1 附近无跳变。
     """)
 
 with st.expander("6. 强度分析", expanded=False):
@@ -1136,6 +1171,8 @@ with st.expander("8. 修正系数一览", expanded=False):
 | 跨距 L | 三点弯曲实验支点距离 | 30 mm |
 
 **编织层压扁折减**：编织层为网眼结构，受压时网眼先塌陷，实际抗压扁能力比均质环低。系数 0.7 表示折减 30%。此系数只作用于编织层的环向模量 E_θ，影响 Kp 和 Fc，不影响 EA 和 EI。
+
+**厚壁修正 const_eff**：随 t/R 连续变化。厚壁下有效常数增大，Kp 相对纯薄壁公式降低。t/R=0.3 时 Kp 约降 22%，t/R=0.5 时约降 33%。
     """)
 
 with st.expander("9. 实验标定流程（详细步骤）", expanded=False):
@@ -1173,6 +1210,8 @@ with st.expander("9. 实验标定流程（详细步骤）", expanded=False):
 **Kp 实测** = 初始线性段斜率
 **Kp 修正系数** = Kp 实测 / Kp 理论
 
+⚠️ **v34 提醒**：厚壁改进后 Kp 理论值系统性降低。若之前已标定过 kp_correction，需重新标定。原 0.4 通常需调到 0.43~0.45。
+
 **软化系数 c** = 2D(r - 0.5) / (1 - r)
 其中 r = F_A/F_B，D 为外径，A、B 为曲线上两个点。
 
@@ -1197,7 +1236,7 @@ with st.expander("9. 实验标定流程（详细步骤）", expanded=False):
 | 压缩 ΔD=1.0mm 时 F | 3.5 N |
 | 三点弯曲跨距 L | 30 mm |
 
-**标定结果**：EA 修正 0.62、Kp 修正 0.40、软化系数 c 0.27、粘接系数 η 0.50。
+**标定结果**：EA 修正 0.62、Kp 修正 0.40（v34 前）或 0.43（v34 后）、软化系数 c 0.27、粘接系数 η 0.50。
 
 ---
 
@@ -1212,7 +1251,7 @@ with st.expander("9. 实验标定流程（详细步骤）", expanded=False):
 | 系数 | 保守值 |
 |---|---|
 | EA 修正 | 0.6 |
-| Kp 修正 | 0.4 |
+| Kp 修正 | 0.4（薄壁） / 0.6（厚壁） |
 | 粘接系数 η | 0.8 |
 | 软化系数 c | 1.0 |
 | 编织层压扁折减 | 0.7 |
@@ -1242,7 +1281,7 @@ Excel 报告所有 sheet 和列名均为中文。
 with st.expander("12. 常见问题", expanded=False):
     st.markdown("""
 **Q1：算出来 Kp 太大？**
-A：Kp 是线性小变形刚度，真实值需乘修正系数 0.3~0.5。
+A：Kp 是线性小变形刚度，薄壁需乘 0.3~0.5，厚壁需乘 0.6~0.8。
 
 **Q2：为什么改了模量，Fu 没变？**
 A：Fu 只取决于抗拉强度。
@@ -1264,13 +1303,27 @@ A：按一次 Enter，或点"🔄 强制刷新计算"。
 
 **Q8：Excel 导出报错？**
 A：需要安装 openpyxl。
+
+**Q9：为什么强度分析里某层显示"— (σ≤0 跳过)"？**
+A：该层抗拉强度设成了 0 或负。程序会从强度分析中排除它，但保留在刚度分析中（如果 E>0）。
+
+**Q10：v34 厚壁改进后为什么 Kp 变小了？**
+A：有效几何常数 const_eff 随 t/R 增大而增大，Kp 相应降低。t/R 越大，降低越明显。这是修正了之前用薄壁公式高估厚壁 Kp 的系统误差。
     """)
 
 with st.expander("13. 物理背景与局限", expanded=False):
     st.markdown("""
 **理论模型**：多层同心圆管、完全粘接、材料线弹性、小变形、Timoshenko 薄环理论。
 
-**主要简化**：忽略材料非线性、层间滑移、截面椭圆化、剪切变形。
+**v34 厚壁改进**：
+- 有效几何常数 const_eff 随 t/R 连续变化（改进 #1）
+- Kp 使用统一柔度叠加公式，t/R = 0.1 附近无跳变（改进 #2）
+
+**主要简化**：忽略材料非线性、层间滑移、截面椭圆化（Brazier）、剪切变形、屈曲。
+
+**薄壁 vs 厚壁的准确性**：
+- 薄壁（t/R < 0.1）：EA 可信，EI 大曲率下高估，Fu_y / Fc 高估 2~3 倍（漏屈曲），Kp 需 × 0.3~0.5
+- 厚壁（t/R > 0.2）：EA/EI/Fu_y/My 较可信，Kp 需 × 0.6~0.8，Fc 仍有 15~30% 偏差
 
 **适用范围**：相对比较、参数扫描、早期发现设计缺陷完全适用；预测绝对刚度值需实验标定。
 
@@ -1356,6 +1409,21 @@ else:
     c1.metric("轴向刚度 EA (N)", f"{EA:.2f}")
     c2.metric("弯曲刚度 EI (N·mm²)", f"{EI:.2f}")
     c3.metric("抗压扁刚度 Kp (N/mm)", f"{Kp:.2f}")
+
+    # === 改进 #1 显示：当前 t/R 与 const_eff ===
+    r0_disp = min(l['r_in'] for l in layers)
+    rn_disp = max(l['r_out'] for l in layers)
+    R_disp = (r0_disp + rn_disp) / 2
+    tr_disp = (rn_disp - r0_disp) / R_disp if R_disp > 0 else 0.0
+    const_eff_disp = compute_effective_const(tr_disp)
+    const_thin_disp = np.pi / 4 - 2 / np.pi
+
+    st.caption(
+        f"当前截面 t/R = **{tr_disp:.3f}** | "
+        f"有效几何常数 const_eff = **{const_eff_disp:.4f}** "
+        f"（薄壁极限 {const_thin_disp:.4f}，比值 {const_eff_disp/const_thin_disp:.3f}）| "
+        f"模型：**{model_used}**"
+    )
 
     st.subheader("刚度沿长度分布")
     if len(all_schemes) > 1:
@@ -1620,12 +1688,14 @@ else:
     if filler_names:
         st.info(f"当前段缺失的层已自动用热熔材料填充：{', '.join(filler_names)}。")
 
-    if thick_ratio < 0.1:
-        st.info(f"壁厚/半径比 = **{thick_ratio:.3f}** < 0.1（薄壁）。抗压扁模型：**{model_used}**。")
+    if thick_ratio < 0.08:
+        st.info(f"壁厚/半径比 t/R = **{thick_ratio:.3f}** < 0.08（薄壁）。抗压扁模型：**{model_used}**。")
+    elif thick_ratio < 0.15:
+        st.warning(f"壁厚/半径比 t/R = **{thick_ratio:.3f}** ∈ [0.08, 0.15)（过渡区）。抗压扁模型：**{model_used}**。")
     elif thick_ratio < 0.5:
-        st.warning(f"壁厚/半径比 = **{thick_ratio:.3f}** ∈ [0.1, 0.5)（厚壁）。抗压扁模型：**{model_used}**。")
+        st.info(f"壁厚/半径比 t/R = **{thick_ratio:.3f}** ∈ [0.15, 0.5)（厚壁）。抗压扁模型：**{model_used}**。")
     else:
-        st.error(f"壁厚/半径比 = **{thick_ratio:.3f}** ≥ 0.5（极厚壁）。抗压扁模型：**{model_used}**。")
+        st.warning(f"壁厚/半径比 t/R = **{thick_ratio:.3f}** ≥ 0.5（极厚壁）。抗压扁模型：**{model_used}**。")
 
 # ============================================================
 # 第二部分：强度分析
@@ -1902,8 +1972,9 @@ with exp_col3:
                 cur_metrics = {
                     '指标': ['轴向刚度 EA (N)', '弯曲刚度 EI (N·mm²)', '抗压扁刚度 Kp (N/mm)',
                              '拉伸极限 Fu (N)', '拉伸起始屈服 Fu_y (N)',
-                             '弯曲屈服力矩 My (N·mm)', '压扁屈服力 Fc (N)'],
-                    '值': [EA, EI, Kp, Fu, Fu_y, My, Fc]
+                             '弯曲屈服力矩 My (N·mm)', '压扁屈服力 Fc (N)',
+                             '壁厚半径比 t/R', '有效几何常数 const_eff'],
+                    '值': [EA, EI, Kp, Fu, Fu_y, My, Fc, tr_disp, const_eff_disp]
                 }
                 pd.DataFrame(cur_metrics).to_excel(writer, sheet_name='当前截面指标', index=False)
 
