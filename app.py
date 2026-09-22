@@ -5,6 +5,9 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import io
 import copy
+import json
+import hashlib
+from datetime import datetime
 
 try:
     import openpyxl
@@ -165,6 +168,135 @@ def clear_all_layer_keys():
     for k in list(st.session_state.keys()):
         if any(k.startswith(p) for p in prefixes):
             del st.session_state[k]
+
+# ==================== 模型参数导入 / 导出 ====================
+MODEL_FILE_VERSION = 1
+
+def _to_native(v):
+    """把 numpy / pandas 标量转成 Python 原生类型，便于 JSON 序列化。"""
+    if v is None:
+        return None
+    try:
+        if v is pd.NA or v is pd.NaT:
+            return None
+    except Exception:
+        pass
+    if isinstance(v, np.bool_):
+        return bool(v)
+    if isinstance(v, np.integer):
+        return int(v)
+    if isinstance(v, np.floating):
+        fv = float(v)
+        return None if pd.isna(fv) else fv
+    if isinstance(v, float):
+        return None if pd.isna(v) else v
+    if isinstance(v, (list, tuple, np.ndarray)):
+        return [_to_native(x) for x in v]
+    return v
+
+def structure_to_json_obj(structure):
+    """把 structure 转成可 JSON 序列化的列表。"""
+    out = []
+    for layer in structure:
+        df = layer.get('data')
+        records = []
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            for _, row in df.iterrows():
+                records.append({str(c): _to_native(row[c]) for c in df.columns})
+        out.append({
+            'name': str(layer.get('name', '') or ''),
+            'type': str(layer.get('type', '普通材料')),
+            'data': records,
+        })
+    return out
+
+def json_obj_to_structure(layers_in, warn_list):
+    """把 JSON 里的层列表还原成 structure（含 DataFrame）。"""
+    if not isinstance(layers_in, list):
+        raise ValueError('structure 字段必须是列表')
+    structure = []
+    for i, item in enumerate(layers_in):
+        if not isinstance(item, dict):
+            warn_list.append(f'第 {i+1} 层不是有效对象，已跳过')
+            continue
+        ltype = item.get('type', '普通材料')
+        if ltype not in LAYER_TYPES:
+            warn_list.append(f'第 {i+1} 层类型 "{ltype}" 未知，已回退为"普通材料"')
+            ltype = '普通材料'
+        name = str(item.get('name', '') or f'Layer {i+1}')
+        expected = LAYER_TYPES[ltype]['columns']
+        records = item.get('data', [])
+
+        if not isinstance(records, list) or not records:
+            warn_list.append(f'第 {i+1} 层无数据，已用默认值填充')
+            df = make_default_layer(ltype)
+        else:
+            try:
+                df = pd.DataFrame(records)
+            except Exception:
+                warn_list.append(f'第 {i+1} 层数据无法解析，已用默认值填充')
+                df = make_default_layer(ltype)
+            else:
+                missing = [c for c in expected if c not in df.columns]
+                if missing:
+                    warn_list.append(
+                        f'第 {i+1} 层缺少列：{"、".join(missing)}，已补默认值')
+                for c in expected:
+                    if c not in df.columns:
+                        df[c] = LAYER_TYPES[ltype]['default'].get(c, 0.0)
+                df = df[expected].copy()
+                for c in expected:
+                    df[c] = pd.to_numeric(df[c], errors='coerce')
+                if df.empty:
+                    df = make_default_layer(ltype)
+
+        structure.append({'name': name, 'type': ltype, 'data': df})
+    return structure
+
+def parse_model_payload(payload, L_total_fallback=30.0):
+    """解析导入的 JSON，返回 (structure, params, warnings)。"""
+    warn_list = []
+    if not isinstance(payload, dict):
+        raise ValueError('文件内容不是有效的 JSON 对象')
+
+    if payload.get('app') not in (None, 'microcatheter_analysis'):
+        warn_list.append('该文件的来源标识不是本工具，仍尝试导入。')
+
+    layers_in = payload.get('structure')
+    if layers_in is None:
+        raise ValueError('文件缺少 structure 字段')
+
+    structure = json_obj_to_structure(layers_in, warn_list)
+    if not structure:
+        raise ValueError('文件中没有有效的层数据')
+
+    def pick(key, default, lo=None, hi=None):
+        raw = payload.get(key, None)
+        v = safe_float(raw, None)
+        if v is None:
+            if key in payload and raw is not None:
+                warn_list.append(f'参数 {key} 非法（{raw!r}），使用默认值 {default}')
+            else:
+                warn_list.append(f'缺少参数 {key}，使用默认值 {default}')
+            v = default
+        if lo is not None or hi is not None:
+            v = float(np.clip(
+                v,
+                lo if lo is not None else -np.inf,
+                hi if hi is not None else np.inf
+            ))
+        return v
+
+    params = {
+        'L_total':            pick('L_total', L_total_fallback, 1.0, 100000.0),
+        'ea_correction':      pick('ea_correction', 1.0, 0.01, 2.0),
+        'kp_correction':      pick('kp_correction', 1.0, 0.01, 10.0),
+        'span_L':             pick('span_L', 30.0, 1.0, 200.0),
+        'eta_bond':           pick('eta_bond', 0.8, 0.0, 1.0),
+        'softening_c':        pick('softening_c', 1.0, 0.0, 10.0),
+        'braid_crush_factor': pick('braid_crush_factor', 1.0, 0.1, 1.0),
+    }
+    return structure, params, warn_list
 
 # ==================== 参数校验 ====================
 def check_parameters(structure, L_total, span_L):
@@ -1169,6 +1301,101 @@ with st.sidebar:
                     st.rerun()
 
     st.markdown("---")
+    st.markdown("**📦 模型参数导入 / 导出**")
+    st.caption(
+        "把当前模型（层结构 + 全部修正系数）存成 JSON 文件，"
+        "换电脑 / 换浏览器 / 备份时导入即可完全恢复。"
+    )
+
+    # ---------- 导出 ----------
+    export_payload = {
+        'app': 'microcatheter_analysis',
+        'model_file_version': MODEL_FILE_VERSION,
+        'structure_version': CURRENT_VERSION,
+        'exported_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'L_total': float(L_total),
+        'ea_correction': float(ea_correction),
+        'kp_correction': float(kp_correction),
+        'span_L': float(span_L),
+        'eta_bond': float(eta_bond),
+        'softening_c': float(softening_c),
+        'braid_crush_factor': float(braid_crush_factor),
+        'structure': structure_to_json_obj(st.session_state.structure),
+    }
+    model_json_bytes = json.dumps(
+        export_payload, ensure_ascii=False, indent=2
+    ).encode('utf-8')
+
+    st.download_button(
+        "⬇️ 导出模型参数 (JSON)",
+        data=model_json_bytes,
+        file_name=f"catheter_model_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+        mime="application/json",
+        key="dl_model_json",
+    )
+
+    # ---------- 导入 ----------
+    uploaded_model = st.file_uploader(
+        "⬆️ 导入模型参数 (JSON)",
+        type=['json'],
+        key="model_uploader",
+        help="选择之前导出的 JSON 文件。导入会覆盖当前的全部结构参数，"
+             "请先保存/导出当前模型以防丢失。",
+    )
+
+    if uploaded_model is not None:
+        raw_bytes = uploaded_model.getvalue()
+        file_hash = hashlib.md5(raw_bytes).hexdigest()
+
+        if st.session_state.get('imported_model_hash') == file_hash:
+            st.success(f"已导入：{uploaded_model.name}")
+        else:
+            try:
+                payload_in = json.loads(raw_bytes.decode('utf-8-sig'))
+                new_structure, new_params, imp_warnings = parse_model_payload(
+                    payload_in, L_total_fallback=L_total)
+            except Exception as e:
+                st.error(f"解析失败：{e}")
+            else:
+                st.info(
+                    f"文件：{uploaded_model.name}\n\n"
+                    f"共 {len(new_structure)} 层；"
+                    f"总长 {new_params['L_total']:.1f} mm；"
+                    f"EA 修正 {new_params['ea_correction']:.2f}，"
+                    f"Kp 修正 {new_params['kp_correction']:.3f}，"
+                    f"跨距 {new_params['span_L']:.1f} mm"
+                )
+                for w in imp_warnings:
+                    st.warning(w)
+
+                if st.button("✅ 确认导入（覆盖当前模型）",
+                             key="confirm_import_model", type="primary"):
+                    st.session_state.structure = new_structure
+                    st.session_state.L_total = new_params['L_total']
+                    st.session_state.ea_correction = new_params['ea_correction']
+                    st.session_state.kp_correction = new_params['kp_correction']
+                    st.session_state.span_L = new_params['span_L']
+                    st.session_state.eta_bond = new_params['eta_bond']
+                    st.session_state.softening_c = new_params['softening_c']
+                    st.session_state.braid_crush_factor = new_params['braid_crush_factor']
+
+                    # x 位置钳制到新的总长范围内
+                    st.session_state.x_pos = min(
+                        max(safe_float(st.session_state.get('x_pos', 0.0), 0.0), 0.0),
+                        new_params['L_total']
+                    )
+                    st.session_state.imported_model_hash = file_hash
+
+                    # 清掉所有层的控件状态 + 数值输入框状态，否则会显示旧值
+                    clear_all_layer_keys()
+                    for k in ('ea_corr_input', 'kp_corr_input', 'span_L_input',
+                              'eta_bond_input', 'softening_c_input',
+                              'braid_crush_factor_input'):
+                        if k in st.session_state:
+                            del st.session_state[k]
+                    st.rerun()
+
+    st.markdown("---")
     if st.button("🔄 强制刷新计算", key="refresh_btn"):
         st.rerun()
 
@@ -1256,7 +1483,7 @@ with st.expander("2. 界面总览", expanded=False):
 | 参数明细表 | 当前截面所有层参数 |
 | 导出功能 | 3 个导出按钮 |
 
-**侧边栏：** 导管结构定义、刚度修正系数、编织层压扁折减、抗压扁非线性参数、抗拉强度参数、三点弯曲试验参数、方案管理。
+**侧边栏：** 导管结构定义、刚度修正系数、编织层压扁折减、抗压扁非线性参数、抗拉强度参数、三点弯曲试验参数、方案管理、模型参数导入/导出。
     """)
 
 with st.expander("3. 输入参数详解", expanded=False):
@@ -1421,6 +1648,8 @@ with st.expander("11. 导出功能", expanded=False):
 | 当前截面参数表 | 当前 x 位置所有层参数 | CSV |
 | 沿长度曲线数据 | 200 个采样点的六条曲线 | CSV |
 | 完整报告 | 多 sheet 完整报告 | Excel |
+| 导出模型参数 | 层结构 + 全部修正系数（可再导入恢复） | JSON |
+| 导入模型参数 | 从 JSON 恢复完整模型 | JSON |
 
 Excel 报告所有 sheet 和列名均为中文。
     """)
@@ -1471,6 +1700,17 @@ A：① 添加/删除层时清理所有层的会话状态；② safe_float 统�
 **Q14：v40 修了什么？**
 A：改了层名称后，侧边栏 expander 标题不同步。现在每次渲染前
 先从 session_state 同步最新名称，标题与输入框保持一致。
+
+**Q15：怎么把模型带到另一台电脑？**
+A：侧边栏最下方「📦 模型参数导入 / 导出」→ 点「⬇️ 导出模型参数 (JSON)」，
+得到 `catheter_model_日期_时间.json`。在新环境打开程序后，
+用「⬆️ 导入模型参数 (JSON)」选这个文件，确认导入即可。
+导入会覆盖当前结构、总长、EA/Kp 修正、跨距、粘接系数、软化系数、
+编织层折减等全部参数。
+
+**Q16：导入提示「参数 xxx 非法」怎么办？**
+A：程序会自动退回该参数的默认值并给出警告，其余参数照常导入。
+若提示「文件缺少 structure 字段」，说明这个 JSON 不是本工具导出的。
     """)
 
 with st.expander("13. 物理背景与局限", expanded=False):
@@ -1488,6 +1728,8 @@ with st.expander("13. 物理背景与局限", expanded=False):
 - Excel sheet 名清理
 
 **v40 名称同步**：expander 标题实时反映最新层名称。
+
+**v40+ 模型导入/导出**：JSON 格式完整保存/恢复层结构与全部修正系数。
 
 **主要简化**：忽略材料非线性、层间滑移、截面椭圆化（Brazier）、剪切变形、屈曲。
 
