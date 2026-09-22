@@ -124,11 +124,12 @@ def normalize_structure(structure):
             layer['data'] = df[expected_cols]
     return structure
 
-# ==================== 安全辅助函数（v38 加固） ====================
+# ==================== 安全辅助函数 ====================
 def safe_float(v, default=None):
-    """安全转 float。None / NaN / 非数值 → 返回 default（默认 None）。"""
     try:
         if v is None:
+            return default
+        if isinstance(v, str) and v.strip() == '':
             return default
         fv = float(v)
         if pd.isna(fv):
@@ -138,7 +139,6 @@ def safe_float(v, default=None):
         return default
 
 def safe_seg_label(df_cur, j):
-    """安全生成段标签，避免 NaN/None 导致格式化异常。"""
     try:
         row = df_cur.iloc[j]
         s = row.get('起始位置(mm)', None)
@@ -151,11 +151,17 @@ def safe_seg_label(df_cur, j):
     except Exception:
         return f"第 {j+1} 段"
 
+def sanitize_excel_sheet_name(name, max_len=31):
+    for c in ['[', ']', '*', '?', '/', '\\', ':']:
+        name = name.replace(c, '_')
+    name = name.strip()
+    if not name:
+        name = "Sheet"
+    return name[:max_len]
+
 def clear_all_layer_keys():
-    """清空所有层相关的 session_state key（data_/name_/type_/mat_select_/seg_select_/dup_last_）。
-    添加/删除层后索引会偏移，必须整体清理避免状态错位。"""
     prefixes = ("data_", "name_", "type_", "mat_select_", "seg_select_",
-                "apply_mat_", "dup_last_")
+                "apply_mat_", "dup_last_", "del_last_", "del_")
     for k in list(st.session_state.keys()):
         if any(k.startswith(p) for p in prefixes):
             del st.session_state[k]
@@ -181,7 +187,6 @@ def check_parameters(structure, L_total, span_L):
                 errors.append(f"第 {i+1} 层（{name}）第 {j+1} 段：读取失败")
                 continue
 
-            # 全空行（data_editor 新增）跳过
             if (start_raw is None or pd.isna(start_raw)) and \
                (end_raw is None or pd.isna(end_raw)) and \
                (r_in_raw is None or pd.isna(r_in_raw)) and \
@@ -193,8 +198,15 @@ def check_parameters(structure, L_total, span_L):
             r_in = safe_float(r_in_raw, None)
             r_out = safe_float(r_out_raw, None)
 
-            if start is None or end is None or r_in is None or r_out is None:
-                errors.append(f"第 {i+1} 层（{name}）第 {j+1} 段：位置/半径存在空值或非法值")
+            missing = []
+            if start is None: missing.append('起始位置')
+            if end is None: missing.append('结束位置')
+            if r_in is None: missing.append('内半径')
+            if r_out is None: missing.append('外半径')
+            if missing:
+                errors.append(
+                    f"第 {i+1} 层（{name}）第 {j+1} 段：以下字段缺失或非法（{'、'.join(missing)}）"
+                )
                 continue
 
             if start < 0:
@@ -272,7 +284,7 @@ def check_parameters(structure, L_total, span_L):
     return errors, warnings
 
 # ==================== 会话状态 ====================
-CURRENT_VERSION = "v38_hardened"
+CURRENT_VERSION = "v40_name_sync"
 
 if 'structure_version' not in st.session_state or st.session_state.structure_version != CURRENT_VERSION:
     st.session_state.structure = create_default_structure()
@@ -325,7 +337,7 @@ def find_hot_melt_props(structure, x):
             r_out_v = safe_float(row.get('外半径(mm)', None), None)
             E_v = safe_float(row.get('弹性模量(MPa)', None), None)
             sig_v = safe_float(row.get('抗拉强度(MPa)', None), 0.0)
-            if r_out_v is None or E_v is None:
+            if r_out_v is None or r_out_v <= 0 or E_v is None:
                 continue
             candidates.append((r_out_v, E_v, sig_v if sig_v is not None else 0.0))
     if not candidates:
@@ -345,6 +357,8 @@ def get_reference_radius(structure, layer_type_name):
             r_in_v = safe_float(row.get('内半径(mm)', None), None)
             r_out_v = safe_float(row.get('外半径(mm)', None), None)
             if r_in_v is None or r_out_v is None:
+                continue
+            if r_out_v <= r_in_v or r_out_v <= 0:
                 continue
             refs.append((r_in_v, r_out_v))
     if not refs:
@@ -429,7 +443,7 @@ def compute_coil_tensile_force(sigma_uts, d_wire, pitch, r_in, r_out):
     Fu = sigma_uts * np.pi * d_wire**3 / (8.0 * D) * beta_factor
     return Fu
 
-# ==================== 截面生成（单层 try/except 加固） ====================
+# ==================== 截面生成 ====================
 def compute_at_x(structure, x, eta_bond=1.0, braid_crush_factor=1.0):
     hot_melt_E, hot_melt_sigma = find_hot_melt_props(structure, x)
     layers = []
@@ -486,7 +500,6 @@ def compute_at_x(structure, x, eta_bond=1.0, braid_crush_factor=1.0):
             else:
                 continue
 
-            # 最终边界保护：任何关键值 NaN 都跳过
             if pd.isna(E_z) or pd.isna(E_theta):
                 continue
 
@@ -501,7 +514,6 @@ def compute_at_x(structure, x, eta_bond=1.0, braid_crush_factor=1.0):
                 'layer_idx': idx, 'is_filler': False
             })
         except Exception:
-            # 单层异常不影响其他层
             continue
 
     def is_occupied(r_in_ref, r_out_ref, tol=0.005):
@@ -542,18 +554,30 @@ def compute_at_x(structure, x, eta_bond=1.0, braid_crush_factor=1.0):
 # ==================== 管壁刚度 ====================
 def compute_wall_bending_stiffness(E_theta, r_in, r_out):
     t = r_out - r_in
-    if t <= 0: return 0.0
-    if r_in <= 1e-9 or r_in / r_out < 0.5:
+    if t <= 0:
+        return 0.0
+    R_mid = (r_in + r_out) / 2
+    if R_mid <= 0:
+        return 0.0
+    if r_in <= 1e-9:
         return E_theta * t**3 / 12
-    r_n = t / np.log(r_out / r_in)
-    e = (r_out + r_in) / 2 - r_n
+    tr = t / R_mid
+    if tr < 0.1:
+        return E_theta * t**3 / 12
+    try:
+        r_n = t / np.log(r_out / r_in)
+    except (ValueError, ZeroDivisionError):
+        return E_theta * t**3 / 12
+    e = R_mid - r_n
+    if e <= 0:
+        return E_theta * t**3 / 12
     return E_theta * t * e * r_n
 
 def compute_wall_axial_stiffness(E_theta, r_in, r_out):
     t = r_out - r_in
     return E_theta * t if t > 0 else 0.0
 
-# ==================== 厚壁改进：有效几何常数 ====================
+# ==================== 厚壁：有效几何常数 ====================
 def compute_effective_const(tr):
     const_thin = np.pi / 4 - 2 / np.pi
     return const_thin * (1.0 + 0.5 * tr + 1.0 * tr * tr)
@@ -808,7 +832,6 @@ def compute_along_length(structure, L_total, ea_corr=1.0, kp_corr=1.0, eta_bond=
             EA_arr[i] = EA; EI_arr[i] = EI; Kp_arr[i] = Kp
             Fu_arr[i] = Fu; My_arr[i] = My; Fc_arr[i] = Fc
         except Exception:
-            # 单点异常不影响整体扫描
             continue
     return xs, EA_arr, EI_arr, Kp_arr, Fu_arr, My_arr, Fc_arr
 
@@ -838,7 +861,6 @@ with st.sidebar:
                          'type': new_type,
                          'data': make_default_layer(new_type, L_total, r_in_ref, r_out_ref)}
             st.session_state.structure.insert(int(insert_pos), new_layer)
-            # 索引偏移：清空所有层 key
             clear_all_layer_keys()
             st.rerun()
 
@@ -846,12 +868,25 @@ with st.sidebar:
     st.markdown("**编辑各层**")
 
     for i, layer in enumerate(st.session_state.structure):
-        with st.expander(f"第{i+1}层：{layer['name']}（{layer['type']}）", expanded=False):
-            # 保证 layer['type'] 是已知类型（防止旧 state 残留）
-            if layer['type'] not in LAYER_TYPES:
-                layer['type'] = '普通材料'
-                layer['data'] = make_default_layer('普通材料', L_total)
+        # 防御性检查：type 必须在已知类型里
+        if layer.get('type') not in LAYER_TYPES:
+            layer['type'] = '普通材料'
+            layer['data'] = make_default_layer('普通材料', L_total)
 
+        # ============================================================
+        # v40 修复：在渲染 expander 之前，从 session_state 同步最新名称
+        # 这样 expander 标题与 text_input 显示的名称保持一致
+        # ============================================================
+        ss_name_key = f"name_{i}"
+        if ss_name_key in st.session_state:
+            ss_name = st.session_state[ss_name_key]
+            if isinstance(ss_name, str):
+                stripped = ss_name.strip()
+                if stripped != '' and stripped != layer.get('name', ''):
+                    layer['name'] = stripped
+        name_for_title = layer.get('name', '') or f'Layer {i+1}'
+
+        with st.expander(f"第{i+1}层：{name_for_title}（{layer['type']}）", expanded=False):
             if layer['type'] == '普通材料':
                 mat_options = list(MATERIAL_LIBRARY_NORMAL.keys())
                 selected_mat = st.selectbox("📚 材料库（室温典型值）", mat_options, key=f"mat_select_{i}")
@@ -881,7 +916,7 @@ with st.sidebar:
                                     df_new.loc[df_new.index[seg_idx], '弹性模量(MPa)'] = mat['E']
                                     df_new.loc[df_new.index[seg_idx], '抗拉强度(MPa)'] = mat['sigma']
                             layer['data'] = df_new
-                            editor_key_clear = f"data_{i}_{layer['type']}_v38"
+                            editor_key_clear = f"data_{i}_{layer['type']}_v40"
                             if editor_key_clear in st.session_state:
                                 del st.session_state[editor_key_clear]
                             st.rerun()
@@ -918,7 +953,7 @@ with st.sidebar:
                                     df_new.loc[df_new.index[seg_idx], '丝材模量(MPa)'] = mat['E_f']
                                     df_new.loc[df_new.index[seg_idx], '丝材抗拉强度(MPa)'] = mat['sigma_f']
                             layer['data'] = df_new
-                            editor_key_clear = f"data_{i}_{layer['type']}_v38"
+                            editor_key_clear = f"data_{i}_{layer['type']}_v40"
                             if editor_key_clear in st.session_state:
                                 del st.session_state[editor_key_clear]
                             st.rerun()
@@ -928,7 +963,8 @@ with st.sidebar:
 
             col1, col2, col3 = st.columns([2, 2, 1])
             with col1:
-                new_name = st.text_input("名称（图表中显示）", value=layer['name'], key=f"name_{i}")
+                # v40：text_input 的 key 复用 ss_name_key
+                new_name = st.text_input("名称（图表中显示）", value=layer['name'], key=ss_name_key)
                 if new_name != layer['name']:
                     layer['name'] = new_name
             with col2:
@@ -944,7 +980,7 @@ with st.sidebar:
                     r_out = safe_float(old.get('外半径(mm)', None), 0.3048)
                     start = safe_float(old.get('起始位置(mm)', None), 0.0)
                     end = safe_float(old.get('结束位置(mm)', None), L_total)
-                    old_key = f"data_{i}_{layer['type']}_v38"
+                    old_key = f"data_{i}_{layer['type']}_v40"
                     if old_key in st.session_state:
                         del st.session_state[old_key]
                     layer['type'] = new_type
@@ -955,13 +991,12 @@ with st.sidebar:
             with col3:
                 if st.button("删除", key=f"del_{i}"):
                     st.session_state.structure.pop(i)
-                    # 索引偏移：清空所有层 key
                     clear_all_layer_keys()
                     st.rerun()
 
             st.caption(LAYER_TYPES[layer['type']]['caption'])
 
-            editor_key = f"data_{i}_{layer['type']}_v38"
+            editor_key = f"data_{i}_{layer['type']}_v40"
 
             if editor_key in st.session_state:
                 cached = st.session_state[editor_key]
@@ -982,7 +1017,6 @@ with st.sidebar:
             if edited is not None:
                 layer['data'] = edited.copy()
 
-            # 复制最后一行
             col_dup, col_del_last, col_hint = st.columns([1.2, 1.2, 2])
             with col_dup:
                 if st.button("📋 复制最后一行", key=f"dup_last_{i}",
@@ -1431,10 +1465,12 @@ A：在某个层里点"📋 复制最后一行"，会把最后一行复制一份
 新行的"起始位置"自动接续上一行的"结束位置"。然后改材料/半径等参数就行。
 
 **Q13：v38 加固了什么？**
-A：① 添加/删除层时清理所有层的会话状态（避免索引偏移导致的 UI 错位）；
-② 所有数值转换改用 safe_float，None/NaN/非法值统一兜底；
-③ compute_at_x 每层独立 try/except，单个层异常不影响其他层；
-④ 参数校验更严格，空值和非法值单独报错。
+A：① 添加/删除层时清理所有层的会话状态；② safe_float 统一兜底；
+③ compute_at_x 每层独立 try/except；④ 参数校验更严格。
+
+**Q14：v40 修了什么？**
+A：改了层名称后，侧边栏 expander 标题不同步。现在每次渲染前
+先从 session_state 同步最新名称，标题与输入框保持一致。
     """)
 
 with st.expander("13. 物理背景与局限", expanded=False):
@@ -1443,11 +1479,15 @@ with st.expander("13. 物理背景与局限", expanded=False):
 
 **v34 厚壁改进**：const_eff 随 t/R 连续变化，Kp 统一柔度叠加公式。
 
-**v35~v38 稳定性修复**：
+**v35~v39 稳定性修复**：
 - 安全格式化函数
 - data_editor 状态同步
 - 复制/删除最后一行
 - 全局 state 清理 + safe_float 加固
+- 薄壁/厚壁判据修正（t/R_mid）
+- Excel sheet 名清理
+
+**v40 名称同步**：expander 标题实时反映最新层名称。
 
 **主要简化**：忽略材料非线性、层间滑移、截面椭圆化（Brazier）、剪切变形、屈曲。
 
@@ -2229,7 +2269,7 @@ with exp_col3:
                             writer, sheet_name=f'方案对比_x{x_pos:.0f}mm', index=False)
 
                 for i, layer in enumerate(structure):
-                    sheet_name = f'层{i+1}_{layer["name"]}'[:31]
+                    sheet_name = sanitize_excel_sheet_name(f'层{i+1}_{layer["name"]}')
                     try:
                         layer['data'].to_excel(writer, sheet_name=sheet_name, index=False)
                     except Exception:
