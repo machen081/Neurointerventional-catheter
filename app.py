@@ -349,6 +349,24 @@ def parse_model_payload(payload, L_total_fallback=30.0):
 
     return structure, params, saved_schemes, warn_list
 
+def parse_json_text(raw_text, L_total_fallback=30.0):
+    """从文本解析 JSON。自动处理 BOM、首尾空白。"""
+    if raw_text is None:
+        raise ValueError('输入为空')
+    text = raw_text
+    if isinstance(text, (bytes, bytearray)):
+        text = text.decode('utf-8-sig')
+    else:
+        text = str(text)
+    text = text.strip().lstrip('\ufeff')
+    if not text:
+        raise ValueError('输入内容为空')
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ValueError(f'JSON 格式错误：第 {e.lineno} 行第 {e.colno} 列 — {e.msg}')
+    return parse_model_payload(payload, L_total_fallback=L_total_fallback)
+
 # ==================== 参数校验 ====================
 def check_parameters(structure, L_total, span_L):
     errors = []
@@ -467,7 +485,7 @@ def check_parameters(structure, L_total, span_L):
     return errors, warnings
 
 # ==================== 会话状态 ====================
-CURRENT_VERSION = "v46_button_only_import"
+CURRENT_VERSION = "v47_paste_import"
 
 if 'structure_version' not in st.session_state or st.session_state.structure_version != CURRENT_VERSION:
     st.session_state.structure = create_default_structure()
@@ -1094,7 +1112,7 @@ with st.sidebar:
                                     df_new.loc[df_new.index[seg_idx], '弹性模量(MPa)'] = mat['E']
                                     df_new.loc[df_new.index[seg_idx], '抗拉强度(MPa)'] = mat['sigma']
                             layer['data'] = df_new
-                            editor_key_clear = f"data_{i}_{layer['type']}_v46"
+                            editor_key_clear = f"data_{i}_{layer['type']}_v47"
                             if editor_key_clear in st.session_state:
                                 del st.session_state[editor_key_clear]
                             st.rerun()
@@ -1131,7 +1149,7 @@ with st.sidebar:
                                     df_new.loc[df_new.index[seg_idx], '丝材模量(MPa)'] = mat['E_f']
                                     df_new.loc[df_new.index[seg_idx], '丝材抗拉强度(MPa)'] = mat['sigma_f']
                             layer['data'] = df_new
-                            editor_key_clear = f"data_{i}_{layer['type']}_v46"
+                            editor_key_clear = f"data_{i}_{layer['type']}_v47"
                             if editor_key_clear in st.session_state:
                                 del st.session_state[editor_key_clear]
                             st.rerun()
@@ -1157,7 +1175,7 @@ with st.sidebar:
                     r_out = safe_float(old.get('外半径(mm)', None), 0.3048)
                     start = safe_float(old.get('起始位置(mm)', None), 0.0)
                     end = safe_float(old.get('结束位置(mm)', None), L_total)
-                    old_key = f"data_{i}_{layer['type']}_v46"
+                    old_key = f"data_{i}_{layer['type']}_v47"
                     if old_key in st.session_state:
                         del st.session_state[old_key]
                     layer['type'] = new_type
@@ -1173,7 +1191,7 @@ with st.sidebar:
 
             st.caption(LAYER_TYPES[layer['type']]['caption'])
 
-            editor_key = f"data_{i}_{layer['type']}_v46"
+            editor_key = f"data_{i}_{layer['type']}_v47"
 
             if editor_key in st.session_state:
                 cached = st.session_state[editor_key]
@@ -1348,8 +1366,8 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**📦 模型参数导入 / 导出**")
     st.caption(
-        "把当前模型（层结构 + 全部修正系数 + 已保存方案）存成 JSON 文件，"
-        "换电脑 / 换浏览器 / 分享给同事时，导入即可完全恢复。"
+        "支持两种导入方式：上传 JSON 文件，或把 JSON 内容粘贴到文本框。"
+        "导入会覆盖当前的全部结构参数，请先保存/导出当前模型以防丢失。"
     )
 
     # ---------- 导出 ----------
@@ -1380,103 +1398,133 @@ with st.sidebar:
         key="dl_model_json",
     )
 
-    # ---------- 导入（v46：纯按钮触发，无 hash 逻辑） ----------
-    uploaded_model = st.file_uploader(
-        "⬆️ 导入模型参数 (JSON)",
-        type=['json'],
-        key="model_uploader",
-        help="选择之前导出的 JSON 文件。导入会覆盖当前的全部结构参数，"
-             "请先保存/导出当前模型以防丢失。",
-    )
+    # ---------- 导入（v47：文件上传 或 粘贴文本） ----------
+    with st.expander("⬆️ 导入模型参数", expanded=False):
+        import_mode = st.radio(
+            "选择导入方式",
+            ["📁 上传文件", "📝 粘贴文本"],
+            key="import_mode_radio",
+            horizontal=True,
+        )
 
-    if uploaded_model is not None:
-        try:
-            raw_bytes = uploaded_model.getvalue()
-            payload_in = json.loads(raw_bytes.decode('utf-8-sig'))
-            new_structure, new_params, new_schemes, imp_warnings = parse_model_payload(
-                payload_in, L_total_fallback=L_total)
-        except Exception as e:
-            st.error(f"解析失败：{e}")
-        else:
-            st.info(
-                f"**文件**：{uploaded_model.name}\n\n"
-                f"**主结构**：{len(new_structure)} 层　|　"
-                f"**已保存方案**：{len(new_schemes)} 个　|　"
-                f"**总长**：{new_params['L_total']:.1f} mm\n\n"
-                f"EA 修正 {new_params['ea_correction']:.2f}，"
-                f"Kp 修正 {new_params['kp_correction']:.3f}，"
-                f"跨距 {new_params['span_L']:.1f} mm"
+        uploaded_model = None
+        pasted_text = ""
+
+        if import_mode == "📁 上传文件":
+            uploaded_model = st.file_uploader(
+                "选择 JSON 文件",
+                type=['json'],
+                key="model_uploader",
             )
-            for w in imp_warnings:
-                st.warning(w)
+        else:
+            pasted_text = st.text_area(
+                "把 JSON 内容粘贴到这里",
+                value="",
+                height=200,
+                key="model_paste_area",
+                placeholder='用记事本打开导出的 JSON，全选复制，粘贴到此处',
+            )
 
-            # 已保存方案处理选项
-            local_count = len(st.session_state.saved_schemes)
-            scheme_action = "ignore"
-            if len(new_schemes) > 0:
-                mode = st.radio(
-                    f"文件中含 {len(new_schemes)} 个方案，本地有 {local_count} 个，如何处理？",
-                    [
-                        f"① 覆盖：用文件的 {len(new_schemes)} 个替换本地 {local_count} 个",
-                        "② 合并：同名覆盖，其余追加",
-                        f"③ 忽略：保留本地 {local_count} 个不变",
-                    ],
-                    key="scheme_import_mode",
-                )
-                if mode.startswith("①"):
-                    scheme_action = "replace"
-                elif mode.startswith("②"):
-                    scheme_action = "merge"
-                else:
-                    scheme_action = "ignore"
+        # 统一获取输入文本
+        raw_text = None
+        source_label = ""
+        if import_mode == "📁 上传文件":
+            if uploaded_model is not None:
+                try:
+                    raw_text = uploaded_model.getvalue().decode('utf-8-sig')
+                    source_label = uploaded_model.name
+                except Exception as e:
+                    st.error(f"读取文件失败：{e}")
+                    raw_text = None
+        else:
+            if pasted_text and pasted_text.strip():
+                raw_text = pasted_text
+                source_label = "粘贴的文本"
+
+        # 有输入内容才进入解析和预览流程
+        if raw_text is not None:
+            try:
+                new_structure, new_params, new_schemes, imp_warnings = parse_json_text(
+                    raw_text, L_total_fallback=L_total)
+            except Exception as e:
+                st.error(f"解析失败：{e}")
             else:
-                st.caption("文件中未包含已保存方案，本地方案保持不变。")
-
-            if st.button("✅ 确认导入（覆盖当前模型结构）",
-                         key="confirm_import_model", type="primary"):
-                # 1. 应用主结构 + 全局参数
-                st.session_state.structure = new_structure
-                st.session_state.L_total = new_params['L_total']
-                st.session_state.ea_correction = new_params['ea_correction']
-                st.session_state.kp_correction = new_params['kp_correction']
-                st.session_state.span_L = new_params['span_L']
-                st.session_state.eta_bond = new_params['eta_bond']
-                st.session_state.softening_c = new_params['softening_c']
-                st.session_state.braid_crush_factor = new_params['braid_crush_factor']
-
-                # 2. 处理已保存方案
-                if scheme_action == "replace":
-                    st.session_state.saved_schemes = new_schemes
-                elif scheme_action == "merge":
-                    merged = list(st.session_state.saved_schemes)
-                    for s in new_schemes:
-                        found = False
-                        for idx_m, existing in enumerate(merged):
-                            if existing.get('name') == s.get('name'):
-                                merged[idx_m] = s
-                                found = True
-                                break
-                        if not found:
-                            merged.append(s)
-                    st.session_state.saved_schemes = merged
-                # ignore：不动
-
-                # 3. x 位置钳制
-                st.session_state.x_pos = min(
-                    max(safe_float(st.session_state.get('x_pos', 0.0), 0.0), 0.0),
-                    new_params['L_total']
+                st.info(
+                    f"**来源**：{source_label}\n\n"
+                    f"**主结构**：{len(new_structure)} 层　|　"
+                    f"**已保存方案**：{len(new_schemes)} 个　|　"
+                    f"**总长**：{new_params['L_total']:.1f} mm\n\n"
+                    f"EA 修正 {new_params['ea_correction']:.2f}，"
+                    f"Kp 修正 {new_params['kp_correction']:.3f}，"
+                    f"跨距 {new_params['span_L']:.1f} mm"
                 )
+                for w in imp_warnings:
+                    st.warning(w)
 
-                # 4. 清掉层的控件 + 数值输入 + 方案名 + 上传控件
-                clear_all_layer_keys()
-                for k in ('ea_corr_input', 'kp_corr_input', 'span_L_input',
-                          'eta_bond_input', 'softening_c_input',
-                          'braid_crush_factor_input', 'scheme_name_input',
-                          'model_uploader', 'scheme_import_mode'):
-                    if k in st.session_state:
-                        del st.session_state[k]
+                local_count = len(st.session_state.saved_schemes)
+                scheme_action = "ignore"
+                if len(new_schemes) > 0:
+                    mode = st.radio(
+                        f"文件中含 {len(new_schemes)} 个方案，本地有 {local_count} 个，如何处理？",
+                        [
+                            f"① 覆盖：用文件的 {len(new_schemes)} 个替换本地 {local_count} 个",
+                            "② 合并：同名覆盖，其余追加",
+                            f"③ 忽略：保留本地 {local_count} 个不变",
+                        ],
+                        key="scheme_import_mode",
+                    )
+                    if mode.startswith("①"):
+                        scheme_action = "replace"
+                    elif mode.startswith("②"):
+                        scheme_action = "merge"
+                    else:
+                        scheme_action = "ignore"
+                else:
+                    st.caption("文件中未包含已保存方案，本地方案保持不变。")
 
-                st.rerun()
+                if st.button("✅ 确认导入（覆盖当前模型结构）",
+                             key="confirm_import_model", type="primary"):
+                    st.session_state.structure = new_structure
+                    st.session_state.L_total = new_params['L_total']
+                    st.session_state.ea_correction = new_params['ea_correction']
+                    st.session_state.kp_correction = new_params['kp_correction']
+                    st.session_state.span_L = new_params['span_L']
+                    st.session_state.eta_bond = new_params['eta_bond']
+                    st.session_state.softening_c = new_params['softening_c']
+                    st.session_state.braid_crush_factor = new_params['braid_crush_factor']
+
+                    if scheme_action == "replace":
+                        st.session_state.saved_schemes = new_schemes
+                    elif scheme_action == "merge":
+                        merged = list(st.session_state.saved_schemes)
+                        for s in new_schemes:
+                            found = False
+                            for idx_m, existing in enumerate(merged):
+                                if existing.get('name') == s.get('name'):
+                                    merged[idx_m] = s
+                                    found = True
+                                    break
+                            if not found:
+                                merged.append(s)
+                        st.session_state.saved_schemes = merged
+
+                    st.session_state.x_pos = min(
+                        max(safe_float(st.session_state.get('x_pos', 0.0), 0.0), 0.0),
+                        new_params['L_total']
+                    )
+
+                    clear_all_layer_keys()
+                    for k in ('ea_corr_input', 'kp_corr_input', 'span_L_input',
+                              'eta_bond_input', 'softening_c_input',
+                              'braid_crush_factor_input', 'scheme_name_input',
+                              'model_uploader', 'model_paste_area',
+                              'scheme_import_mode', 'import_mode_radio'):
+                        if k in st.session_state:
+                            del st.session_state[k]
+
+                    st.rerun()
+        else:
+            st.caption("请上传文件或粘贴 JSON 内容。")
 
     st.markdown("---")
     if st.button("🔄 强制刷新计算", key="refresh_btn"):
@@ -1488,7 +1536,8 @@ with st.sidebar:
                          if k in ("ea_corr_input", "kp_corr_input", "span_L_input", "eta_bond_input",
                                   "softening_c_input", "braid_crush_factor_input",
                                   "new_type", "insert_pos", "add_layer_btn", "scheme_name_input",
-                                  "model_uploader", "scheme_import_mode")]
+                                  "model_uploader", "model_paste_area",
+                                  "scheme_import_mode", "import_mode_radio")]
         for k in keys_to_clear:
             if k in st.session_state:
                 del st.session_state[k]
@@ -1733,7 +1782,7 @@ with st.expander("11. 导出功能", expanded=False):
 | 沿长度曲线数据 | 200 个采样点的六条曲线 | CSV |
 | 完整报告 | 多 sheet 完整报告 | Excel |
 | 导出模型参数 | 层结构 + 全部修正系数 + 已保存方案（可再导入恢复） | JSON |
-| 导入模型参数 | 从 JSON 恢复完整模型 | JSON |
+| 导入模型参数 | 从 JSON 恢复完整模型（上传文件 或 粘贴文本） | JSON |
 
 Excel 报告所有 sheet 和列名均为中文。
     """)
@@ -1787,8 +1836,11 @@ A：改了层名称后，侧边栏 expander 标题不同步。现在每次渲染
 
 **Q15：怎么把模型带到另一台电脑？**
 A：侧边栏最下方「📦 模型参数导入 / 导出」→ 点「⬇️ 导出模型参数 (JSON)」，
-得到 `catheter_model_日期_时间.json`。在新环境打开程序后，
-用「⬆️ 导入模型参数 (JSON)」选这个文件，点"确认导入"按钮即可。
+得到 `catheter_model_日期_时间.json`。
+在新环境打开程序后，导入方式有两种：
+- **📁 上传文件**：选这个 JSON 文件，确认导入
+- **📝 粘贴文本**：用记事本打开 JSON 文件，全选复制，粘贴到文本框，确认导入
+
 导入会覆盖当前结构、总长、EA/Kp 修正、跨距、粘接系数、软化系数、
 编织层折减等全部参数。
 
@@ -1810,6 +1862,11 @@ A：导出 JSON 发给对方，让对方导入时选择"① 覆盖"或"② 合�
 A：v46 起，导入成功后上传控件会自动清空，**同一文件需要重新选择**。
 选择后即可再次看到预览和"确认导入"按钮。
 这样可以避免"上传即生效"，误操作。
+
+**Q20：粘贴文本方式怎么用？**
+A：v47 新增。用记事本打开导出的 JSON 文件，全选复制，
+在侧边栏导入区选「📝 粘贴文本」，把内容粘到文本框里，确认导入即可。
+适合在服务器、远程桌面等无法直接上传文件的场景。
     """)
 
 with st.expander("13. 物理背景与局限", expanded=False):
@@ -1828,8 +1885,8 @@ with st.expander("13. 物理背景与局限", expanded=False):
 
 **v40 名称同步**：expander 标题实时反映最新层名称。
 
-**v45~v46 完整导入/导出**：JSON 会包含主结构 + 全局参数 + **所有已保存方案**；
-导入时可选覆盖 / 合并 / 忽略；上传即预览，点"确认导入"按钮才执行。
+**v45~v47 完整导入/导出**：JSON 会包含主结构 + 全局参数 + **所有已保存方案**；
+导入时可选覆盖 / 合并 / 忽略；支持**文件上传**和**文本粘贴**两种方式。
 
 **主要简化**：忽略材料非线性、层间滑移、截面椭圆化（Brazier）、剪切变形、屈曲。
 
