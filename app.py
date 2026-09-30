@@ -177,29 +177,25 @@ def sanitize_excel_sheet_name(name, max_len=31):
     name = name.strip()
     return (name or "Sheet")[:max_len]
 
-def bump_editor_revision(i):
-    """外部修改某层数据后，递增该层编辑器的 revision，强制重建编辑器。"""
-    old_rev = st.session_state.editor_revisions.get(i, 0)
-    # 尝试清理旧 key（避免 session_state 堆积）
-    old_keys = [k for k in list(st.session_state.keys())
-                if k.startswith(f"data_{i}_") and f"_rev{old_rev}" in k]
-    for k in old_keys:
+def mark_layer_dirty(i):
+    """外部修改某层数据后调用。强制 data_editor 用最新 layer['data'] 重建。"""
+    st.session_state[f"layer_force_sync_{i}"] = True
+
+def clear_all_layer_editor_state():
+    """删除所有编辑器状态（载入方案/导入/恢复示例时用）。"""
+    keys_to_del = []
+    for k in list(st.session_state.keys()):
+        if k.startswith("layer_editor_data_") or \
+           k.startswith("layer_editor_widget_") or \
+           k.startswith("layer_force_sync_") or \
+           k.startswith("name_") or k.startswith("type_") or \
+           k.startswith("mat_select_") or k.startswith("seg_select_"):
+            keys_to_del.append(k)
+    for k in keys_to_del:
         try:
             del st.session_state[k]
         except Exception:
             pass
-    st.session_state.editor_revisions[i] = old_rev + 1
-
-def clear_all_layer_keys():
-    prefixes = ("data_", "name_", "type_", "mat_select_", "seg_select_",
-                "apply_mat_", "dup_last_", "del_last_", "del_")
-    for k in list(st.session_state.keys()):
-        if any(k.startswith(p) for p in prefixes):
-            try:
-                del st.session_state[k]
-            except Exception:
-                pass
-    st.session_state.editor_revisions = {}
 
 # ==================== 导入/导出 ====================
 MODEL_FILE_VERSION = 3
@@ -467,25 +463,29 @@ def check_parameters(structure, L_total, span_L):
     return list(dict.fromkeys(errors)), list(dict.fromkeys(warnings))
 
 # ==================== 会话状态 ====================
-CURRENT_VERSION = "v51_editor_fix"
+CURRENT_VERSION = "v52_unified_widget_keys"
+
+# 所有全局参数的默认值
+_DEFAULT_GLOBALS = [
+    ('L_total', 30.0), ('x_pos', 0.0),
+    ('ea_correction', 1.0), ('kp_correction', 1.0),
+    ('span_L', 30.0), ('eta_bond', 0.8), ('softening_c', 1.0),
+    ('braid_crush_factor', 1.0),
+    ('tp_offset_mm', 0.0), ('tp_offset_N', 0.0),
+    ('tp_delta_input', 0.5),
+    ('saved_schemes', []),
+    ('custom_materials_normal', {}), ('custom_materials_wire', {}),
+]
 
 if 'structure_version' not in st.session_state or st.session_state.structure_version != CURRENT_VERSION:
     st.session_state.structure = create_default_structure()
     st.session_state.structure_version = CURRENT_VERSION
-    for k, v in [('L_total', 30.0), ('x_pos', 0.0), ('ea_correction', 1.0), ('kp_correction', 1.0),
-                 ('span_L', 30.0), ('eta_bond', 0.8), ('softening_c', 1.0), ('braid_crush_factor', 1.0),
-                 ('saved_schemes', []), ('custom_materials_normal', {}), ('custom_materials_wire', {}),
-                 ('tp_offset_mm', 0.0), ('tp_offset_N', 0.0), ('tp_delta_input', 0.5),
-                 ('editor_revisions', {})]:
+    for k, v in _DEFAULT_GLOBALS:
         st.session_state[k] = v
 else:
     st.session_state.structure = normalize_structure(st.session_state.structure)
 
-for k, v in [('L_total', 30.0), ('x_pos', 0.0), ('ea_correction', 1.0), ('kp_correction', 1.0),
-             ('span_L', 30.0), ('eta_bond', 0.8), ('softening_c', 1.0), ('braid_crush_factor', 1.0),
-             ('saved_schemes', []), ('custom_materials_normal', {}), ('custom_materials_wire', {}),
-             ('tp_offset_mm', 0.0), ('tp_offset_N', 0.0), ('tp_delta_input', 0.5),
-             ('editor_revisions', {})]:
+for k, v in _DEFAULT_GLOBALS:
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -953,8 +953,7 @@ def compute_along_length(structure, L_total, ea_corr=1.0, kp_corr=1.0, eta_bond=
 # ==================== 侧边栏 ====================
 with st.sidebar:
     st.header("导管结构定义")
-    L_total = st.number_input("导管总长度 (mm)", min_value=1.0, value=st.session_state.L_total, step=10.0)
-    st.session_state.L_total = L_total
+    st.number_input("导管总长度 (mm)", min_value=1.0, step=10.0, key="L_total")
 
     st.markdown("**层顺序：列表第一个为最外层**")
 
@@ -962,7 +961,8 @@ with st.sidebar:
         new_type = st.selectbox("层类型", list(LAYER_TYPES.keys()), key="new_type")
         insert_pos = st.number_input("插入位置（0=最外，末尾=最内）", min_value=0,
                                      max_value=len(st.session_state.structure),
-                                     value=len(st.session_state.structure), step=1, key="insert_pos")
+                                     value=len(st.session_state.structure),
+                                     step=1, key="insert_pos")
         if st.button("添加层", key="add_layer_btn"):
             if st.session_state.structure:
                 try:
@@ -974,9 +974,10 @@ with st.sidebar:
                 r_out_ref, r_in_ref = 0.4, 0.27
             new_layer = {'name': f'Layer {len(st.session_state.structure)+1}',
                          'type': new_type,
-                         'data': make_default_layer(new_type, L_total, r_in_ref, r_out_ref)}
+                         'data': make_default_layer(new_type, st.session_state.L_total,
+                                                     r_in_ref, r_out_ref)}
             st.session_state.structure.insert(int(insert_pos), new_layer)
-            clear_all_layer_keys()
+            clear_all_layer_editor_state()
             st.rerun()
 
     st.markdown("---")
@@ -985,7 +986,7 @@ with st.sidebar:
     for i, layer in enumerate(st.session_state.structure):
         if layer.get('type') not in LAYER_TYPES:
             layer['type'] = '普通材料'
-            layer['data'] = make_default_layer('普通材料', L_total)
+            layer['data'] = make_default_layer('普通材料', st.session_state.L_total)
 
         ss_name_key = f"name_{i}"
         if ss_name_key in st.session_state:
@@ -1026,7 +1027,7 @@ with st.sidebar:
                                     df_new.loc[df_new.index[seg_idx], '弹性模量(MPa)'] = mat['E']
                                     df_new.loc[df_new.index[seg_idx], '抗拉强度(MPa)'] = mat['sigma']
                             layer['data'] = df_new
-                            bump_editor_revision(i)
+                            mark_layer_dirty(i)
                             st.rerun()
                 with col_b:
                     if selected_mat != "自定义":
@@ -1062,7 +1063,7 @@ with st.sidebar:
                                     df_new.loc[df_new.index[seg_idx], '丝材模量(MPa)'] = mat['E_f']
                                     df_new.loc[df_new.index[seg_idx], '丝材抗拉强度(MPa)'] = mat['sigma_f']
                             layer['data'] = df_new
-                            bump_editor_revision(i)
+                            mark_layer_dirty(i)
                             st.rerun()
                 with col_b:
                     if selected_mat != "自定义":
@@ -1086,34 +1087,45 @@ with st.sidebar:
                     r_in = safe_float(old.get('内半径(mm)', None), 0.27)
                     r_out = safe_float(old.get('外半径(mm)', None), 0.3048)
                     start = safe_float(old.get('起始位置(mm)', None), 0.0)
-                    end = safe_float(old.get('结束位置(mm)', None), L_total)
+                    end = safe_float(old.get('结束位置(mm)', None), st.session_state.L_total)
                     layer['type'] = new_type
                     layer['data'] = make_default_layer(new_type, end, r_in, r_out)
                     if len(layer['data']) > 0:
                         layer['data'].loc[layer['data'].index[0], '起始位置(mm)'] = start
-                    bump_editor_revision(i)
+                    mark_layer_dirty(i)
                     st.rerun()
             with col3:
                 if st.button("删除", key=f"del_{i}"):
                     st.session_state.structure.pop(i)
-                    clear_all_layer_keys()
+                    clear_all_layer_editor_state()
                     st.rerun()
 
             st.caption(LAYER_TYPES[layer['type']]['caption'])
 
-            # ============ data_editor（v51 修复：无反向同步 + revision 机制） ============
-            rev = st.session_state.editor_revisions.get(i, 0)
-            editor_key = f"data_{i}_{layer['type']}_rev{rev}"
+            # ============ data_editor：用独立数据源 + 强制同步 ============
+            editor_data_key = f"layer_editor_data_{i}"
+            force_sync = st.session_state.get(f"layer_force_sync_{i}", False)
+
+            if force_sync or editor_data_key not in st.session_state:
+                st.session_state[editor_data_key] = layer['data'].copy()
+                st.session_state[f"layer_force_sync_{i}"] = False
+                # 强制清理 widget 状态
+                widget_key = f"layer_editor_widget_{i}"
+                if widget_key in st.session_state:
+                    try:
+                        del st.session_state[widget_key]
+                    except Exception:
+                        pass
 
             edited = st.data_editor(
-                layer['data'],
+                st.session_state[editor_data_key],
                 num_rows="dynamic",
                 use_container_width=True,
-                key=editor_key
+                key=f"layer_editor_widget_{i}"
             )
             if edited is not None:
+                st.session_state[editor_data_key] = edited.copy()
                 layer['data'] = edited.copy()
-            # 不做任何反向同步
 
             col_dup, col_del_last, col_hint = st.columns([1.2, 1.2, 2])
             with col_dup:
@@ -1130,14 +1142,14 @@ with st.sidebar:
                         except Exception:
                             pass
                         layer['data'] = pd.concat([layer['data'], new_row_df], ignore_index=True)
-                        bump_editor_revision(i)
+                        mark_layer_dirty(i)
                         st.rerun()
             with col_del_last:
                 if st.button("🗑️ 删除最后一行", key=f"del_last_{i}",
                              help="删除本层最后一行。至少保留一行。"):
                     if len(layer['data']) > 1:
                         layer['data'] = layer['data'].iloc[:-1].reset_index(drop=True)
-                        bump_editor_revision(i)
+                        mark_layer_dirty(i)
                         st.rerun()
                     else:
                         st.warning("至少保留一行。")
@@ -1146,57 +1158,36 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("**刚度修正系数**")
-    ea_correction = st.number_input("轴向刚度 EA 修正系数", min_value=0.01, max_value=2.0,
-                                    value=float(st.session_state.ea_correction),
-                                    step=0.05, format="%.2f", key="ea_corr_input")
-    st.session_state.ea_correction = ea_correction
-
-    kp_correction = st.number_input("抗压扁刚度 Kp 修正系数", min_value=0.01, max_value=10.0,
-                                    value=float(st.session_state.kp_correction),
-                                    step=0.01, format="%.3f", key="kp_corr_input")
-    st.session_state.kp_correction = kp_correction
+    st.number_input("轴向刚度 EA 修正系数", min_value=0.01, max_value=2.0,
+                    step=0.05, format="%.2f", key="ea_correction")
+    st.number_input("抗压扁刚度 Kp 修正系数", min_value=0.01, max_value=10.0,
+                    step=0.01, format="%.3f", key="kp_correction")
 
     st.markdown("---")
     st.markdown("**编织层压扁折减**")
-    braid_crush_factor = st.number_input("编织层环向模量折减系数",
-        min_value=0.1, max_value=1.0,
-        value=float(st.session_state.braid_crush_factor),
-        step=0.05, format="%.2f", key="braid_crush_factor_input")
-    st.session_state.braid_crush_factor = braid_crush_factor
+    st.number_input("编织层环向模量折减系数", min_value=0.1, max_value=1.0,
+                    step=0.05, format="%.2f", key="braid_crush_factor")
 
     st.markdown("---")
     st.markdown("**抗压扁非线性参数**")
-    softening_c = st.number_input("软化系数 c（越大越软）",
-        min_value=0.0, max_value=10.0,
-        value=float(st.session_state.softening_c),
-        step=0.1, format="%.2f", key="softening_c_input")
-    st.session_state.softening_c = softening_c
+    st.number_input("软化系数 c（越大越软）", min_value=0.0, max_value=10.0,
+                    step=0.1, format="%.2f", key="softening_c")
 
     st.markdown("---")
     st.markdown("**抗拉强度参数**")
-    eta_bond = st.number_input("热熔填充与丝材的粘接系数 η", min_value=0.0, max_value=1.0,
-                               value=float(st.session_state.eta_bond),
-                               step=0.05, format="%.2f", key="eta_bond_input")
-    st.session_state.eta_bond = eta_bond
+    st.number_input("热熔填充与丝材的粘接系数 η", min_value=0.0, max_value=1.0,
+                    step=0.05, format="%.2f", key="eta_bond")
 
     st.markdown("---")
     st.markdown("**三点弯曲试验参数**")
-    span_L = st.number_input("三点弯曲跨距 L (mm)", min_value=1.0, max_value=200.0,
-                             value=float(st.session_state.span_L),
-                             step=1.0, key="span_L_input")
-    st.session_state.span_L = span_L
-
-    tp_offset_mm = st.number_input("位移截距 (mm)", min_value=-100.0, max_value=100.0,
-                                   value=float(st.session_state.tp_offset_mm),
-                                   step=0.1, format="%.2f", key="tp_offset_mm_input",
-                                   help="试验曲线的位移零点修正。")
-    st.session_state.tp_offset_mm = tp_offset_mm
-
-    tp_offset_N = st.number_input("力截距 (N)", min_value=-1000.0, max_value=1000.0,
-                                  value=float(st.session_state.tp_offset_N),
-                                  step=0.01, format="%.2f", key="tp_offset_N_input",
-                                  help="试验曲线的力零点修正。")
-    st.session_state.tp_offset_N = tp_offset_N
+    st.number_input("三点弯曲跨距 L (mm)", min_value=1.0, max_value=200.0,
+                    step=1.0, key="span_L")
+    st.number_input("位移截距 (mm)", min_value=-100.0, max_value=100.0,
+                    step=0.1, format="%.2f", key="tp_offset_mm",
+                    help="试验曲线的位移零点修正。")
+    st.number_input("力截距 (N)", min_value=-1000.0, max_value=1000.0,
+                    step=0.01, format="%.2f", key="tp_offset_N",
+                    help="试验曲线的力零点修正。")
 
     st.markdown("---")
     st.markdown("**📚 材料库管理**")
@@ -1272,10 +1263,13 @@ with st.sidebar:
         if st.button("💾 保存当前方案", key="save_scheme_btn", type="primary"):
             scheme = {'name': scheme_name,
                       'structure': copy.deepcopy(st.session_state.structure),
-                      'L_total': L_total, 'ea_correction': ea_correction,
-                      'kp_correction': kp_correction, 'eta_bond': eta_bond,
-                      'softening_c': softening_c, 'span_L': span_L,
-                      'braid_crush_factor': braid_crush_factor}
+                      'L_total': st.session_state.L_total,
+                      'ea_correction': st.session_state.ea_correction,
+                      'kp_correction': st.session_state.kp_correction,
+                      'eta_bond': st.session_state.eta_bond,
+                      'softening_c': st.session_state.softening_c,
+                      'span_L': st.session_state.span_L,
+                      'braid_crush_factor': st.session_state.braid_crush_factor}
             existing_idx = None
             for idx, s in enumerate(st.session_state.saved_schemes):
                 if s['name'] == scheme_name:
@@ -1308,7 +1302,7 @@ with st.sidebar:
                     st.session_state.softening_c = s['softening_c']
                     st.session_state.span_L = s['span_L']
                     st.session_state.braid_crush_factor = s.get('braid_crush_factor', 1.0)
-                    clear_all_layer_keys()
+                    clear_all_layer_editor_state()
                     st.rerun()
             with col_del:
                 if st.button("删除", key=f"del_scheme_{idx}"):
@@ -1322,10 +1316,13 @@ with st.sidebar:
         'model_file_version': MODEL_FILE_VERSION,
         'structure_version': CURRENT_VERSION,
         'exported_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'L_total': float(L_total), 'ea_correction': float(ea_correction),
-        'kp_correction': float(kp_correction), 'span_L': float(span_L),
-        'eta_bond': float(eta_bond), 'softening_c': float(softening_c),
-        'braid_crush_factor': float(braid_crush_factor),
+        'L_total': float(st.session_state.L_total),
+        'ea_correction': float(st.session_state.ea_correction),
+        'kp_correction': float(st.session_state.kp_correction),
+        'span_L': float(st.session_state.span_L),
+        'eta_bond': float(st.session_state.eta_bond),
+        'softening_c': float(st.session_state.softening_c),
+        'braid_crush_factor': float(st.session_state.braid_crush_factor),
         'tp_offset_mm': float(st.session_state.tp_offset_mm),
         'tp_offset_N': float(st.session_state.tp_offset_N),
         'custom_materials_normal': st.session_state.custom_materials_normal,
@@ -1368,7 +1365,7 @@ with st.sidebar:
         if raw_text is not None:
             try:
                 new_structure, new_params, new_schemes, new_cm_norm, new_cm_wire, imp_warnings = \
-                    parse_json_text(raw_text, L_total_fallback=L_total)
+                    parse_json_text(raw_text, L_total_fallback=st.session_state.L_total)
             except Exception as e:
                 st.error(f"解析失败：{e}")
             else:
@@ -1427,33 +1424,15 @@ with st.sidebar:
                     st.session_state.x_pos = min(
                         max(safe_float(st.session_state.get('x_pos', 0.0), 0.0), 0.0),
                         new_params['L_total'])
-                    clear_all_layer_keys()
-                    for k in ('ea_corr_input', 'kp_corr_input', 'span_L_input',
-                              'eta_bond_input', 'softening_c_input',
-                              'braid_crush_factor_input', 'scheme_name_input',
-                              'model_uploader', 'model_paste_area',
-                              'scheme_import_mode', 'import_mode_radio',
-                              'tp_offset_mm_input', 'tp_offset_N_input'):
-                        if k in st.session_state:
-                            del st.session_state[k]
+                    clear_all_layer_editor_state()
                     st.rerun()
 
     st.markdown("---")
     if st.button("🔄 强制刷新计算", key="refresh_btn"):
         st.rerun()
     if st.button("恢复示例数据", key="reset_btn"):
-        clear_all_layer_keys()
-        keys_to_clear = [k for k in list(st.session_state.keys())
-                         if k in ("ea_corr_input", "kp_corr_input", "span_L_input", "eta_bond_input",
-                                  "softening_c_input", "braid_crush_factor_input",
-                                  "new_type", "insert_pos", "add_layer_btn", "scheme_name_input",
-                                  "model_uploader", "model_paste_area",
-                                  "scheme_import_mode", "import_mode_radio",
-                                  "tp_offset_mm_input", "tp_offset_N_input")]
-        for k in keys_to_clear:
-            if k in st.session_state:
-                del st.session_state[k]
-        st.session_state.structure = create_default_structure(L_total)
+        clear_all_layer_editor_state()
+        st.session_state.structure = create_default_structure(st.session_state.L_total)
         st.session_state.x_pos = 0.0
         st.session_state.ea_correction = 1.0
         st.session_state.kp_correction = 1.0
@@ -1835,7 +1814,7 @@ with st.expander("15. 物理背景与局限", expanded=False):
 # ============================================================
 x_pos_safe = min(max(st.session_state.x_pos, 0.0), L_total)
 x_pos = st.slider("Axial position x (mm)", min_value=0.0, max_value=L_total,
-                  value=x_pos_safe, step=0.5)
+                  value=x_pos_safe, step=0.5, key="x_pos")
 st.session_state.x_pos = x_pos
 
 all_schemes = []
@@ -2183,15 +2162,14 @@ if layers:
 
     col_d1, col_d2 = st.columns([1, 3])
     with col_d1:
-        tp_delta = st.number_input(
+        st.number_input(
             "下压距离 δ (mm)",
             min_value=0.0, max_value=100.0,
-            value=float(st.session_state.tp_delta_input),
             step=0.1, format="%.2f",
-            key="tp_delta_input_widget",
+            key="tp_delta_input",
             help="输入实验的下压量，比如 0.1、0.5、1.0、5.0 等"
         )
-    st.session_state.tp_delta_input = tp_delta
+    tp_delta = st.session_state.tp_delta_input
 
     if L_span > 0 and EI > 0:
         k_elastic = 48.0 * EI / (L_span ** 3)
