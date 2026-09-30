@@ -16,6 +16,25 @@ except ImportError:
 
 st.set_page_config(page_title="微导管多层结构分析", layout="wide")
 
+# ============ 全局：pending 机制（必须在所有 widget 之前） ============
+# 导入 / 载入方案 / 恢复示例 等外部操作，需要重置某些 widget。
+# 做法：把要重置的 widget key 列表放进 _pending_widget_reset，
+# 下一轮 rerun 开始（widget 还没渲染）时执行删除。
+if '_pending_widget_reset' in st.session_state:
+    for _k in st.session_state.pop('_pending_widget_reset'):
+        if _k in st.session_state:
+            try:
+                del st.session_state[_k]
+            except Exception:
+                pass
+
+if '_pending_session_updates' in st.session_state:
+    for _k, _v in st.session_state.pop('_pending_session_updates').items():
+        try:
+            st.session_state[_k] = _v
+        except Exception:
+            pass
+
 # ==================== 材料库 ====================
 MATERIAL_LIBRARY_NORMAL_DEFAULT = {
     "PTFE (块体)": {"E": 500.0, "sigma": 106.2},
@@ -32,7 +51,6 @@ MATERIAL_LIBRARY_NORMAL_DEFAULT = {
     "聚氨酯": {"E": 30.0, "sigma": 30.0},
     "聚乙烯 (HDPE)": {"E": 900.0, "sigma": 25.0},
 }
-
 MATERIAL_LIBRARY_WIRE_DEFAULT = {
     "不锈钢 304 (冷加工)": {"E_f": 193000.0, "sigma_f": 2200.0},
     "不锈钢 316LVM (冷加工)": {"E_f": 193000.0, "sigma_f": 2400.0},
@@ -43,16 +61,14 @@ MATERIAL_LIBRARY_WIRE_DEFAULT = {
 
 def get_normal_library():
     lib = {"自定义": None}
-    for k, v in MATERIAL_LIBRARY_NORMAL_DEFAULT.items():
-        lib[k] = v
+    lib.update(MATERIAL_LIBRARY_NORMAL_DEFAULT)
     for k, v in st.session_state.get('custom_materials_normal', {}).items():
         lib[k] = v
     return lib
 
 def get_wire_library():
     lib = {"自定义": None}
-    for k, v in MATERIAL_LIBRARY_WIRE_DEFAULT.items():
-        lib[k] = v
+    lib.update(MATERIAL_LIBRARY_WIRE_DEFAULT)
     for k, v in st.session_state.get('custom_materials_wire', {}).items():
         lib[k] = v
     return lib
@@ -146,7 +162,6 @@ def normalize_structure(structure):
             layer['data'] = df.reset_index(drop=True)
     return structure
 
-# ==================== 安全辅助 ====================
 def safe_float(v, default=None):
     try:
         if v is None:
@@ -177,27 +192,30 @@ def sanitize_excel_sheet_name(name, max_len=31):
     name = name.strip()
     return (name or "Sheet")[:max_len]
 
-def mark_layer_dirty(i):
-    """外部修改某层数据后调用。强制 data_editor 用最新 layer['data'] 重建。"""
-    st.session_state[f"layer_force_sync_{i}"] = True
-
-def clear_all_layer_editor_state():
-    """删除所有编辑器状态（载入方案/导入/恢复示例时用）。"""
-    keys_to_del = []
-    for k in list(st.session_state.keys()):
-        if k.startswith("layer_editor_data_") or \
-           k.startswith("layer_editor_widget_") or \
-           k.startswith("layer_force_sync_") or \
-           k.startswith("name_") or k.startswith("type_") or \
-           k.startswith("mat_select_") or k.startswith("seg_select_"):
-            keys_to_del.append(k)
-    for k in keys_to_del:
+def bump_editor_revision(i):
+    rev = st.session_state.get('editor_revisions', {})
+    old_rev = rev.get(i, 0)
+    old_keys = [k for k in list(st.session_state.keys())
+                if k.startswith(f"data_editor_{i}_rev{old_rev}")]
+    for k in old_keys:
         try:
             del st.session_state[k]
         except Exception:
             pass
+    rev[i] = old_rev + 1
+    st.session_state.editor_revisions = rev
 
-# ==================== 导入/导出 ====================
+def clear_all_layer_editor_state():
+    prefixes = ("data_editor_", "name_", "type_", "mat_select_", "seg_select_",
+                "apply_mat_", "dup_last_", "del_last_", "del_")
+    for k in list(st.session_state.keys()):
+        if any(k.startswith(p) for p in prefixes):
+            try:
+                del st.session_state[k]
+            except Exception:
+                pass
+    st.session_state.editor_revisions = {}
+
 MODEL_FILE_VERSION = 3
 
 def _to_native(v):
@@ -228,7 +246,11 @@ def structure_to_json_obj(structure):
         records = []
         if isinstance(df, pd.DataFrame) and not df.empty:
             for _, row in df.iterrows():
-                records.append({str(c): _to_native(row[c]) for c in df.columns})
+                rec = {str(c): _to_native(row[c]) for c in df.columns}
+                # 跳过全空行
+                if all(v is None for v in rec.values()):
+                    continue
+                records.append(rec)
         out.append({'name': str(layer.get('name', '') or ''),
                     'type': str(layer.get('type', '普通材料')),
                     'data': records})
@@ -249,6 +271,10 @@ def json_obj_to_structure(layers_in, warn_list, prefix=''):
         name = str(item.get('name', '') or f'Layer {i+1}')
         expected = LAYER_TYPES[ltype]['columns']
         records = item.get('data', [])
+        # 过滤全空行
+        if isinstance(records, list):
+            records = [r for r in records if isinstance(r, dict)
+                       and any(v is not None for v in r.values())]
         if not isinstance(records, list) or not records:
             warn_list.append(f'{prefix}第 {i+1} 层无数据，已用默认值填充')
             df = make_default_layer(ltype)
@@ -378,7 +404,6 @@ def parse_json_text(raw_text, L_total_fallback=30.0):
         raise ValueError(f'JSON 格式错误：第 {e.lineno} 行第 {e.colno} 列 — {e.msg}')
     return parse_model_payload(payload, L_total_fallback=L_total_fallback)
 
-# ==================== 参数校验 ====================
 def check_parameters(structure, L_total, span_L):
     errors, warnings = [], []
     for i, layer in enumerate(structure):
@@ -463,9 +488,8 @@ def check_parameters(structure, L_total, span_L):
     return list(dict.fromkeys(errors)), list(dict.fromkeys(warnings))
 
 # ==================== 会话状态 ====================
-CURRENT_VERSION = "v52_unified_widget_keys"
+CURRENT_VERSION = "v54_fixed_widget"
 
-# 所有全局参数的默认值
 _DEFAULT_GLOBALS = [
     ('L_total', 30.0), ('x_pos', 0.0),
     ('ea_correction', 1.0), ('kp_correction', 1.0),
@@ -475,6 +499,7 @@ _DEFAULT_GLOBALS = [
     ('tp_delta_input', 0.5),
     ('saved_schemes', []),
     ('custom_materials_normal', {}), ('custom_materials_wire', {}),
+    ('editor_revisions', {}),
 ]
 
 if 'structure_version' not in st.session_state or st.session_state.structure_version != CURRENT_VERSION:
@@ -613,7 +638,6 @@ def compute_at_x(structure, x, eta_bond=1.0, braid_crush_factor=1.0):
     layers = []
     has_braid_here = False
     has_coil_here = False
-
     for idx, layer in enumerate(structure):
         try:
             row = find_segment(layer['data'], x)
@@ -627,7 +651,6 @@ def compute_at_x(structure, x, eta_bond=1.0, braid_crush_factor=1.0):
             if r_in_v is None or r_out_v is None or r_out_v <= r_in_v:
                 continue
             A_total = np.pi * (r_out_v**2 - r_in_v**2)
-
             if ltype == '普通材料':
                 E_z = safe_float(row.get('弹性模量(MPa)', None), None)
                 if E_z is None or E_z <= 0:
@@ -657,10 +680,8 @@ def compute_at_x(structure, x, eta_bond=1.0, braid_crush_factor=1.0):
                 Fu_override = Fu_fiber + Fu_matrix_contrib
             else:
                 continue
-
             if pd.isna(E_z) or pd.isna(E_theta):
                 continue
-
             layers.append({
                 'name': layer['name'], 'type': ltype,
                 'r_in': r_in_v, 'r_out': r_out_v,
@@ -709,7 +730,6 @@ def compute_at_x(structure, x, eta_bond=1.0, braid_crush_factor=1.0):
                                'sigma_uts': hot_melt_sigma if hot_melt_sigma else 15.0,
                                'Fu_override': None, 'Fu_fiber': 0.0, 'Fu_matrix': 0.0,
                                'layer_idx': -1, 'is_filler': True})
-
     layers.sort(key=lambda l: -l['r_out'])
     return layers
 
@@ -953,7 +973,12 @@ def compute_along_length(structure, L_total, ea_corr=1.0, kp_corr=1.0, eta_bond=
 # ==================== 侧边栏 ====================
 with st.sidebar:
     st.header("导管结构定义")
-    st.number_input("导管总长度 (mm)", min_value=1.0, step=10.0, key="L_total")
+    _L_total_input = st.number_input(
+        "导管总长度 (mm)", min_value=1.0, step=10.0,
+        value=float(st.session_state.L_total),
+        key="L_total_input_widget"
+    )
+    st.session_state.L_total = float(_L_total_input)
 
     st.markdown("**层顺序：列表第一个为最外层**")
 
@@ -982,6 +1007,13 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("**编辑各层**")
+
+    def _make_editor_callback(idx, wkey):
+        def _cb():
+            v = st.session_state.get(wkey)
+            if isinstance(v, pd.DataFrame):
+                st.session_state.structure[idx]['data'] = v.copy()
+        return _cb
 
     for i, layer in enumerate(st.session_state.structure):
         if layer.get('type') not in LAYER_TYPES:
@@ -1027,7 +1059,7 @@ with st.sidebar:
                                     df_new.loc[df_new.index[seg_idx], '弹性模量(MPa)'] = mat['E']
                                     df_new.loc[df_new.index[seg_idx], '抗拉强度(MPa)'] = mat['sigma']
                             layer['data'] = df_new
-                            mark_layer_dirty(i)
+                            bump_editor_revision(i)
                             st.rerun()
                 with col_b:
                     if selected_mat != "自定义":
@@ -1063,7 +1095,7 @@ with st.sidebar:
                                     df_new.loc[df_new.index[seg_idx], '丝材模量(MPa)'] = mat['E_f']
                                     df_new.loc[df_new.index[seg_idx], '丝材抗拉强度(MPa)'] = mat['sigma_f']
                             layer['data'] = df_new
-                            mark_layer_dirty(i)
+                            bump_editor_revision(i)
                             st.rerun()
                 with col_b:
                     if selected_mat != "自定义":
@@ -1092,7 +1124,7 @@ with st.sidebar:
                     layer['data'] = make_default_layer(new_type, end, r_in, r_out)
                     if len(layer['data']) > 0:
                         layer['data'].loc[layer['data'].index[0], '起始位置(mm)'] = start
-                    mark_layer_dirty(i)
+                    bump_editor_revision(i)
                     st.rerun()
             with col3:
                 if st.button("删除", key=f"del_{i}"):
@@ -1102,30 +1134,20 @@ with st.sidebar:
 
             st.caption(LAYER_TYPES[layer['type']]['caption'])
 
-            # ============ data_editor：用独立数据源 + 强制同步 ============
-            editor_data_key = f"layer_editor_data_{i}"
-            force_sync = st.session_state.get(f"layer_force_sync_{i}", False)
+            rev = st.session_state.get('editor_revisions', {}).get(i, 0)
+            widget_key = f"data_editor_{i}_rev{rev}"
 
-            if force_sync or editor_data_key not in st.session_state:
-                st.session_state[editor_data_key] = layer['data'].copy()
-                st.session_state[f"layer_force_sync_{i}"] = False
-                # 强制清理 widget 状态
-                widget_key = f"layer_editor_widget_{i}"
-                if widget_key in st.session_state:
-                    try:
-                        del st.session_state[widget_key]
-                    except Exception:
-                        pass
-
-            edited = st.data_editor(
-                st.session_state[editor_data_key],
+            st.data_editor(
+                layer['data'],
                 num_rows="dynamic",
                 use_container_width=True,
-                key=f"layer_editor_widget_{i}"
+                key=widget_key,
+                on_change=_make_editor_callback(i, widget_key),
             )
-            if edited is not None:
-                st.session_state[editor_data_key] = edited.copy()
-                layer['data'] = edited.copy()
+            if widget_key in st.session_state:
+                v = st.session_state[widget_key]
+                if isinstance(v, pd.DataFrame):
+                    layer['data'] = v.copy()
 
             col_dup, col_del_last, col_hint = st.columns([1.2, 1.2, 2])
             with col_dup:
@@ -1142,14 +1164,14 @@ with st.sidebar:
                         except Exception:
                             pass
                         layer['data'] = pd.concat([layer['data'], new_row_df], ignore_index=True)
-                        mark_layer_dirty(i)
+                        bump_editor_revision(i)
                         st.rerun()
             with col_del_last:
                 if st.button("🗑️ 删除最后一行", key=f"del_last_{i}",
                              help="删除本层最后一行。至少保留一行。"):
                     if len(layer['data']) > 1:
                         layer['data'] = layer['data'].iloc[:-1].reset_index(drop=True)
-                        mark_layer_dirty(i)
+                        bump_editor_revision(i)
                         st.rerun()
                     else:
                         st.warning("至少保留一行。")
@@ -1158,36 +1180,60 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("**刚度修正系数**")
-    st.number_input("轴向刚度 EA 修正系数", min_value=0.01, max_value=2.0,
-                    step=0.05, format="%.2f", key="ea_correction")
-    st.number_input("抗压扁刚度 Kp 修正系数", min_value=0.01, max_value=10.0,
-                    step=0.01, format="%.3f", key="kp_correction")
+    _ea_c = st.number_input("轴向刚度 EA 修正系数", min_value=0.01, max_value=2.0,
+                             step=0.05, format="%.2f",
+                             value=float(st.session_state.ea_correction),
+                             key="ea_correction_input_widget")
+    st.session_state.ea_correction = float(_ea_c)
+    _kp_c = st.number_input("抗压扁刚度 Kp 修正系数", min_value=0.01, max_value=10.0,
+                             step=0.01, format="%.3f",
+                             value=float(st.session_state.kp_correction),
+                             key="kp_correction_input_widget")
+    st.session_state.kp_correction = float(_kp_c)
 
     st.markdown("---")
     st.markdown("**编织层压扁折减**")
-    st.number_input("编织层环向模量折减系数", min_value=0.1, max_value=1.0,
-                    step=0.05, format="%.2f", key="braid_crush_factor")
+    _bcf = st.number_input("编织层环向模量折减系数", min_value=0.1, max_value=1.0,
+                            step=0.05, format="%.2f",
+                            value=float(st.session_state.braid_crush_factor),
+                            key="braid_crush_factor_input_widget")
+    st.session_state.braid_crush_factor = float(_bcf)
 
     st.markdown("---")
     st.markdown("**抗压扁非线性参数**")
-    st.number_input("软化系数 c（越大越软）", min_value=0.0, max_value=10.0,
-                    step=0.1, format="%.2f", key="softening_c")
+    _sc = st.number_input("软化系数 c（越大越软）", min_value=0.0, max_value=10.0,
+                           step=0.1, format="%.2f",
+                           value=float(st.session_state.softening_c),
+                           key="softening_c_input_widget")
+    st.session_state.softening_c = float(_sc)
 
     st.markdown("---")
     st.markdown("**抗拉强度参数**")
-    st.number_input("热熔填充与丝材的粘接系数 η", min_value=0.0, max_value=1.0,
-                    step=0.05, format="%.2f", key="eta_bond")
+    _eb = st.number_input("热熔填充与丝材的粘接系数 η", min_value=0.0, max_value=1.0,
+                           step=0.05, format="%.2f",
+                           value=float(st.session_state.eta_bond),
+                           key="eta_bond_input_widget")
+    st.session_state.eta_bond = float(_eb)
 
     st.markdown("---")
     st.markdown("**三点弯曲试验参数**")
-    st.number_input("三点弯曲跨距 L (mm)", min_value=1.0, max_value=200.0,
-                    step=1.0, key="span_L")
-    st.number_input("位移截距 (mm)", min_value=-100.0, max_value=100.0,
-                    step=0.1, format="%.2f", key="tp_offset_mm",
-                    help="试验曲线的位移零点修正。")
-    st.number_input("力截距 (N)", min_value=-1000.0, max_value=1000.0,
-                    step=0.01, format="%.2f", key="tp_offset_N",
-                    help="试验曲线的力零点修正。")
+    _span = st.number_input("三点弯曲跨距 L (mm)", min_value=1.0, max_value=200.0,
+                             step=1.0,
+                             value=float(st.session_state.span_L),
+                             key="span_L_input_widget")
+    st.session_state.span_L = float(_span)
+    _tp_mm = st.number_input("位移截距 (mm)", min_value=-100.0, max_value=100.0,
+                              step=0.1, format="%.2f",
+                              value=float(st.session_state.tp_offset_mm),
+                              key="tp_offset_mm_input_widget",
+                              help="试验曲线的位移零点修正。")
+    st.session_state.tp_offset_mm = float(_tp_mm)
+    _tp_N = st.number_input("力截距 (N)", min_value=-1000.0, max_value=1000.0,
+                             step=0.01, format="%.2f",
+                             value=float(st.session_state.tp_offset_N),
+                             key="tp_offset_N_input_widget",
+                             help="试验曲线的力零点修正。")
+    st.session_state.tp_offset_N = float(_tp_N)
 
     st.markdown("---")
     st.markdown("**📚 材料库管理**")
@@ -1295,13 +1341,21 @@ with st.sidebar:
             with col_load:
                 if st.button("载入", key=f"load_scheme_{idx}"):
                     st.session_state.structure = copy.deepcopy(s['structure'])
-                    st.session_state.L_total = s['L_total']
-                    st.session_state.ea_correction = s['ea_correction']
-                    st.session_state.kp_correction = s['kp_correction']
-                    st.session_state.eta_bond = s['eta_bond']
-                    st.session_state.softening_c = s['softening_c']
-                    st.session_state.span_L = s['span_L']
-                    st.session_state.braid_crush_factor = s.get('braid_crush_factor', 1.0)
+                    st.session_state['_pending_session_updates'] = {
+                        'L_total': s['L_total'],
+                        'ea_correction': s['ea_correction'],
+                        'kp_correction': s['kp_correction'],
+                        'eta_bond': s['eta_bond'],
+                        'softening_c': s['softening_c'],
+                        'span_L': s['span_L'],
+                        'braid_crush_factor': s.get('braid_crush_factor', 1.0),
+                    }
+                    st.session_state['_pending_widget_reset'] = [
+                        'L_total_input_widget', 'ea_correction_input_widget',
+                        'kp_correction_input_widget', 'braid_crush_factor_input_widget',
+                        'softening_c_input_widget', 'eta_bond_input_widget',
+                        'span_L_input_widget',
+                    ]
                     clear_all_layer_editor_state()
                     st.rerun()
             with col_del:
@@ -1390,15 +1444,6 @@ with st.sidebar:
                 if st.button("✅ 确认导入（覆盖当前模型结构）",
                              key="confirm_import_model", type="primary"):
                     st.session_state.structure = new_structure
-                    st.session_state.L_total = new_params['L_total']
-                    st.session_state.ea_correction = new_params['ea_correction']
-                    st.session_state.kp_correction = new_params['kp_correction']
-                    st.session_state.span_L = new_params['span_L']
-                    st.session_state.eta_bond = new_params['eta_bond']
-                    st.session_state.softening_c = new_params['softening_c']
-                    st.session_state.braid_crush_factor = new_params['braid_crush_factor']
-                    st.session_state.tp_offset_mm = new_params['tp_offset_mm']
-                    st.session_state.tp_offset_N = new_params['tp_offset_N']
                     if new_cm_norm:
                         merged_norm = dict(st.session_state.custom_materials_normal)
                         merged_norm.update(new_cm_norm)
@@ -1421,9 +1466,25 @@ with st.sidebar:
                             if not found:
                                 merged.append(s)
                         st.session_state.saved_schemes = merged
-                    st.session_state.x_pos = min(
-                        max(safe_float(st.session_state.get('x_pos', 0.0), 0.0), 0.0),
-                        new_params['L_total'])
+                    st.session_state['_pending_session_updates'] = {
+                        'L_total': new_params['L_total'],
+                        'ea_correction': new_params['ea_correction'],
+                        'kp_correction': new_params['kp_correction'],
+                        'span_L': new_params['span_L'],
+                        'eta_bond': new_params['eta_bond'],
+                        'softening_c': new_params['softening_c'],
+                        'braid_crush_factor': new_params['braid_crush_factor'],
+                        'tp_offset_mm': new_params['tp_offset_mm'],
+                        'tp_offset_N': new_params['tp_offset_N'],
+                        'x_pos': 0.0,
+                    }
+                    st.session_state['_pending_widget_reset'] = [
+                        'L_total_input_widget', 'ea_correction_input_widget',
+                        'kp_correction_input_widget', 'braid_crush_factor_input_widget',
+                        'softening_c_input_widget', 'eta_bond_input_widget',
+                        'span_L_input_widget', 'tp_offset_mm_input_widget',
+                        'tp_offset_N_input_widget', 'x_pos_slider_widget',
+                    ]
                     clear_all_layer_editor_state()
                     st.rerun()
 
@@ -1432,16 +1493,26 @@ with st.sidebar:
         st.rerun()
     if st.button("恢复示例数据", key="reset_btn"):
         clear_all_layer_editor_state()
-        st.session_state.structure = create_default_structure(st.session_state.L_total)
-        st.session_state.x_pos = 0.0
-        st.session_state.ea_correction = 1.0
-        st.session_state.kp_correction = 1.0
-        st.session_state.span_L = 30.0
-        st.session_state.eta_bond = 0.8
-        st.session_state.softening_c = 1.0
-        st.session_state.braid_crush_factor = 1.0
-        st.session_state.tp_offset_mm = 0.0
-        st.session_state.tp_offset_N = 0.0
+        st.session_state.structure = create_default_structure(30.0)
+        st.session_state['_pending_session_updates'] = {
+            'L_total': 30.0,
+            'x_pos': 0.0,
+            'ea_correction': 1.0,
+            'kp_correction': 1.0,
+            'span_L': 30.0,
+            'eta_bond': 0.8,
+            'softening_c': 1.0,
+            'braid_crush_factor': 1.0,
+            'tp_offset_mm': 0.0,
+            'tp_offset_N': 0.0,
+        }
+        st.session_state['_pending_widget_reset'] = [
+            'L_total_input_widget', 'ea_correction_input_widget',
+            'kp_correction_input_widget', 'braid_crush_factor_input_widget',
+            'softening_c_input_widget', 'eta_bond_input_widget',
+            'span_L_input_widget', 'tp_offset_mm_input_widget',
+            'tp_offset_N_input_widget', 'x_pos_slider_widget',
+        ]
         st.rerun()
 
 # ==================== 主区域 ====================
@@ -1489,7 +1560,7 @@ with st.expander("1. 快速开始", expanded=False):
 4. **改参数**：侧边栏展开任意层修改数值
 5. **保存方案**：改好后在 "💾 方案管理" 保存
 
-**分段设置**：每层底部有"📋 复制最后一行"按钮，点击后自动复制上一行作为新段。
+**分段设置**：每层底部有"📋 复制最后一行"按钮。
 
 **参数校验**：程序启动时会自动检查参数合理性。
     """)
@@ -1533,17 +1604,10 @@ with st.expander("3. 单位说明", expanded=False):
 
 **EI 怎么转成 N**
 
-EI 是结构属性，不是力。同一个 EI，在不同加载条件下产生的力不同：
-
 - 三点弯曲（跨距 L，中心加载）：F = 48 · EI · δ / L³（δ 是下压量）
 - 悬臂梁（末端位移 δ）：F = 3 · EI · δ / L³
 
 要得到具体的力，必须知道跨距 L、位移 δ 或曲率 κ。
-
-**工具里已经换算好的**
-
-- 弯曲屈服表的"三点弯曲力 (N)" 列：屈服点的力
-- **三点弯曲弹性段计算器**：输入下压距离，输出弹性段力
     """)
 
 with st.expander("4. 输入参数详解", expanded=False):
@@ -1563,11 +1627,7 @@ with st.expander("5. 材料库使用", expanded=False):
 
 **丝材**：不锈钢 304/316LVM、镍钛合金、钴铬合金 L605、铂钨合金。
 
-**自定义材料**：侧边栏"📚 材料库管理"中可添加、删除自定义材料。
-
-**关于 Pebax 数据**：材料库中 Pebax 的 E 和 σ 采用 Arkema 官方数据（干态，23°C）。
-实际导管成品（含水分、加工历史）的强度通常比官方值低 20~40%，
-建议用 EA 修正系数（0.6~0.8）把偏差拉回来，或直接用实测值。
+**自定义材料**：侧边栏"📚 材料库管理"中可添加、删除。
     """)
 
 with st.expander("6. 刚度分析", expanded=False):
@@ -1576,15 +1636,11 @@ with st.expander("6. 刚度分析", expanded=False):
 
 **各层刚度贡献明细表**：显示每层对 EA、EI、Kp 的贡献值和占比。
 
-**厚壁修正**：有效几何常数随 t/R 连续变化。
-
 **弯曲刚度图的解读**：
 
 - 横轴是位置，纵轴是 EI
 - 曲线是阶梯状：每个台阶对应一个结构段
 - 台阶高 = 那段很硬；台阶低 = 那段很软
-- 台阶起点/终点 = 该段的起止位置
-- 台阶之间落差大 = 段间刚度差异大，过渡处容易应力集中
 - 灰色虚线 = 当前截面位置
     """)
 
@@ -1599,7 +1655,6 @@ with st.expander("7. 强度分析", expanded=False):
 | 压扁屈服 | Fc | 有 |
 
 **弯曲屈服表**包含"三点弯曲力 (N)" 和"预计实验读数 (N)"两列。
-预计实验读数 = 工具预测力 + 力截距。
     """)
 
 with st.expander("8. 三点弯曲弹性段计算器", expanded=False):
@@ -1608,25 +1663,7 @@ with st.expander("8. 三点弯曲弹性段计算器", expanded=False):
 
 **公式**：F = 48 · EI · δ / L³
 
-- EI：从工具读（N·mm²）
-- δ：下压距离（mm）
-- L：跨距（mm）
-
-**输出**：
-
-- 弹性段斜率 k = 48 · EI / L³（N/mm）
-- 弹性段力 F = k · δ
-- 屈服点位移 δy = Fy / k（估算）
-- 状态判断：
-  - δ < 0.8·δy：弹性段，结果可信
-  - 0.8·δy ≤ δ < 1.2·δy：接近屈服
-  - δ ≥ 1.2·δy：超出弹性段，工具会高估
-
-**和实验对比**：
-
-- 实验弹性段的斜率应接近 k
-- 实验读到的屈服点力应对应 Fy
-- 如果实验 5 mm 的力远低于弹性计算值，说明大变形软化严重
+**输出**：弹性段斜率、力、屈服点位移、状态判断。
     """)
 
 with st.expander("9. 非线性力-位移曲线", expanded=False):
@@ -1646,77 +1683,26 @@ with st.expander("10. 修正系数一览", expanded=False):
 | 粘接系数 η | 热熔填充拉力修正 | 0.8 |
 | 软化系数 c | 力-位移曲线软化 | 1.0 |
 | 跨距 L | 三点弯曲实验支点距离 | 30 mm |
-| 位移截距 | 三点弯曲曲线的位移零点 | 0 mm |
-| 力截距 | 三点弯曲曲线的力零点 | 0 N |
     """)
 
 with st.expander("11. 实验标定流程", expanded=False):
     st.markdown("""
-## 11.1 准备工作
-
-设备：万能材料试验机、拉伸夹具、平板压缩夹具、三点弯曲夹具、游标卡尺。
-
-样品：至少 3 根同批次导管。
-
 ## 11.2 拉伸实验（标定 EA 修正 + 粘接系数 η）
 
-1. 取一段导管，长度 L₀ = 100 mm
-2. 两端插入金属芯轴，用锥形夹头夹住
-3. 以 1 mm/min 恒定速度拉伸
-4. 记录力 F 和位移 δ 完整曲线
-5. 至少测 3 根，取平均
-
-**EA 实测** = 初始线性段斜率 k × L₀
 **EA 修正系数** = EA 实测 / EA 理论
 
 ## 11.3 平板压缩实验（标定 Kp 修正 + 软化系数 c）
 
-1. 取短导管 5~10 mm
-2. 放在两块平行平板之间
-3. 恒定速度下压
-
-**Kp 实测** = 初始线性段斜率
 **Kp 修正系数** = Kp 实测 / Kp 理论
 
 ## 11.4 三点弯曲实验
-
-### 与工具对应关系
-
-三点弯曲实验能提取 4 个数：
-
-| 项目 | 怎么读 |
-|---|---|
-| 跨距 L | 卡尺量夹具两点距离 |
-| 弹性段斜率 k | 曲线开头直线段的斜率 |
-| 屈服点力 Fy_exp | 斜率开始变缓处的力 |
-| 屈服点位移 δy_exp | 屈服点处的下压量 |
 
 ### 反推实测 EI
 EI_exp = k · L³ / 48
 
 ### 与工具对比
+
 EA 修正系数 = EI_exp / EI_theory
-
-把这个比例填到侧边栏的"EA 修正系数"里。
-
-### 关于大变形
-
-实验的下压量（比如 5 mm）通常**远超弹性段**。
-工具的弹性公式只在小变形下准确，超过屈服点后会高估。
-
-用"三点弯曲弹性段计算器"：
-- 输入下压量
-- 查看弹性段预测力
-- 查看屈服点位移 δy（判断是否超出弹性段）
-
-### 位移截距 + 力截距
-
-修正实验曲线的零点偏移：
-
-- 位移截距：曲线起点偏离原点的位移量
-- 力截距：曲线起点偏离原点的力量
-
-填入侧边栏后，弯曲屈服表的"预计实验读数"会同步修正。
 
 ## 11.5 保守默认值
 
@@ -1732,9 +1718,7 @@ EA 修正系数 = EI_exp / EI_theory
 
 with st.expander("12. 多方案对比", expanded=False):
     st.markdown("""
-保存、载入、删除方案。方案是快照。
-
-所有曲线图自动叠加显示所有方案。
+保存、载入、删除方案。方案是快照。所有曲线图自动叠加显示所有方案。
     """)
 
 with st.expander("13. 导出功能", expanded=False):
@@ -1744,10 +1728,8 @@ with st.expander("13. 导出功能", expanded=False):
 | 当前截面参数表 | 当前 x 位置所有层参数 | CSV |
 | 沿长度曲线数据 | 200 个采样点的六条曲线 | CSV |
 | 完整报告 | 多 sheet 完整报告 | Excel |
-| 导出模型参数 | 层结构 + 修正系数 + 已保存方案 + 自定义材料 + 三点弯曲截距 | JSON |
+| 导出模型参数 | 层结构 + 修正系数 + 已保存方案 | JSON |
 | 导入模型参数 | 从 JSON 恢复（上传 或 粘贴） | JSON |
-
-**兼容性**：旧版本的 JSON 文件也能导入，缺失的字段自动用默认值。
     """)
 
 with st.expander("14. 常见问题", expanded=False):
@@ -1776,24 +1758,12 @@ A：用记事本打开导出的 JSON，全选复制，选择"📝 粘贴文本"�
 **Q8：材料库可以自己加材料吗？**
 A：可以。侧边栏"📚 材料库管理"里添加。
 
-**Q9：三点弯曲的位移截距和力截距是什么？**
-A：用来修正实验曲线的零点偏移。
+**Q9：三点弯曲力为什么偏大？**
+A：工具的 My 是纯弹性理论值，忽略了 Brazier 椭圆化、σ_uts 偏差、层间滑移等。
+实际力可能只有工具值的 30%~60%。
 
-**Q10：三点弯曲力为什么偏大？**
-A：工具的 My 是纯弹性理论值，忽略了 Brazier 椭圆化、σ_uts 偏差、层间滑移等，
-实际力可能只有工具值的 30%~60%。工具值应视为"理想上限"。
-
-**Q11：实验下压 5mm 怎么和工具对应？**
-A：用"三点弯曲弹性段计算器"输入 5mm 看弹性预测力，
-然后判断 δy（屈服点位移）是否小于 5mm——
-如果小于，说明 5mm 已超出弹性段，工具会高估。
-实际对比应以弹性段斜率反推的 EI 为准。
-
-**Q12：EI 怎么转成 N？**
+**Q10：EI 怎么转成 N？**
 A：不能直接转。要指定加载条件（跨距、位移、曲率）。详见第 3 节。
-
-**Q13：旧版本的 JSON 文件能导入吗？**
-A：可以。旧文件缺字段自动用默认值，不报错。
     """)
 
 with st.expander("15. 物理背景与局限", expanded=False):
@@ -1801,10 +1771,6 @@ with st.expander("15. 物理背景与局限", expanded=False):
 **理论模型**：多层同心圆管、完全粘接、材料线弹性、小变形、Timoshenko 薄环理论。
 
 **主要简化**：忽略材料非线性、层间滑移、截面椭圆化、剪切变形、屈曲。
-
-**薄壁 vs 厚壁的准确性**：
-- 薄壁（t/R < 0.1）：EA 可信，EI 大曲率下高估，Fu_y / Fc 高估 2~3 倍
-- 厚壁（t/R > 0.2）：EA/EI/Fu_y/My 较可信，Kp 需 × 0.6~0.8
 
 **工具定位**：设计筛选工具，不是实验替代品。
     """)
@@ -1814,8 +1780,8 @@ with st.expander("15. 物理背景与局限", expanded=False):
 # ============================================================
 x_pos_safe = min(max(st.session_state.x_pos, 0.0), L_total)
 x_pos = st.slider("Axial position x (mm)", min_value=0.0, max_value=L_total,
-                  value=x_pos_safe, step=0.5, key="x_pos")
-st.session_state.x_pos = x_pos
+                  value=x_pos_safe, step=0.5, key="x_pos_slider_widget")
+st.session_state.x_pos = float(x_pos)
 
 all_schemes = []
 xs, EA_arr, EI_arr, Kp_arr, Fu_arr, My_arr, Fc_arr = compute_along_length(
@@ -1855,9 +1821,6 @@ def make_label(sch):
         return f"Current (Kp_corr={kp_c:.2f}, c={c_v:.2f})"
     return f"{sch['name']} (Kp_corr={kp_c:.2f}, c={c_v:.2f})"
 
-# ============================================================
-# 第一部分：刚度分析
-# ============================================================
 st.markdown("## 一、刚度分析")
 st.caption("刚度描述导管抵抗变形的能力。单位：EA (N)、EI (N·mm²)、Kp (N/mm)。")
 
@@ -2151,9 +2114,6 @@ if layers:
                        "预计实验读数 (N)": col_Fy_actual})
     st.dataframe(pd.DataFrame(b_rows), use_container_width=True)
 
-    # ============================================================
-    # 三点弯曲弹性段计算器
-    # ============================================================
     st.subheader("📐 三点弯曲弹性段计算器")
     st.caption(
         "输入一个下压距离，计算弹性段对应的力。"
@@ -2162,13 +2122,15 @@ if layers:
 
     col_d1, col_d2 = st.columns([1, 3])
     with col_d1:
-        st.number_input(
+        tp_delta_val = st.number_input(
             "下压距离 δ (mm)",
             min_value=0.0, max_value=100.0,
+            value=float(st.session_state.tp_delta_input),
             step=0.1, format="%.2f",
-            key="tp_delta_input",
+            key="tp_delta_input_widget",
             help="输入实验的下压量，比如 0.1、0.5、1.0、5.0 等"
         )
+        st.session_state.tp_delta_input = float(tp_delta_val)
     tp_delta = st.session_state.tp_delta_input
 
     if L_span > 0 and EI > 0:
@@ -2186,20 +2148,11 @@ if layers:
         if delta_yield > 0:
             ratio = tp_delta / delta_yield
             if ratio < 0.8:
-                st.success(
-                    f"✅ **弹性段**：δ = {tp_delta:.2f} mm，约为屈服点位移 {delta_yield:.3f} mm 的 {ratio*100:.0f}%。"
-                    f"弹性公式可信。"
-                )
+                st.success(f"✅ **弹性段**：δ = {tp_delta:.2f} mm，约为屈服点位移 {delta_yield:.3f} mm 的 {ratio*100:.0f}%。弹性公式可信。")
             elif ratio < 1.2:
-                st.warning(
-                    f"⚠️ **接近屈服点**：δ = {tp_delta:.2f} mm，约为屈服点位移 {delta_yield:.3f} mm 的 {ratio*100:.0f}%。"
-                    f"弹性公式开始有偏差。"
-                )
+                st.warning(f"⚠️ **接近屈服点**：δ = {tp_delta:.2f} mm，约为屈服点位移 {delta_yield:.3f} mm 的 {ratio*100:.0f}%。弹性公式开始有偏差。")
             else:
-                st.error(
-                    f"❌ **超出弹性段**：δ = {tp_delta:.2f} mm，是屈服点位移 {delta_yield:.3f} mm 的 {ratio*100:.0f} 倍。"
-                    f"弹性公式严重高估，实际力会因 Brazier 椭圆化和压扁而明显低于 {F_elastic:.3f} N。"
-                )
+                st.error(f"❌ **超出弹性段**：δ = {tp_delta:.2f} mm，是屈服点位移 {delta_yield:.3f} mm 的 {ratio*100:.0f} 倍。弹性公式严重高估。")
 
         st.markdown("**多下压量对比**")
         compare_deltas = [0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0]
@@ -2215,12 +2168,6 @@ if layers:
                 "状态": status
             })
         st.dataframe(pd.DataFrame(dd_rows), use_container_width=True, hide_index=True)
-
-        st.caption(
-            f"注：弹性段斜率 k 由工具计算的弯曲刚度 EI 决定（EI = {EI:.2f} N·mm²）。"
-            f"如果实验测到的斜率低于 k_elastic，说明实际 EI 偏低，"
-            f"可以把 EA 修正系数调为 k_实测 / k_elastic。"
-        )
     else:
         st.info("当前截面 EI 或跨距无效，无法计算弹性段。")
 
