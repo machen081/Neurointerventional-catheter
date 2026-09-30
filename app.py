@@ -488,7 +488,7 @@ def check_parameters(structure, L_total, span_L):
     return list(dict.fromkeys(errors)), list(dict.fromkeys(warnings))
 
 # ==================== 会话状态 ====================
-CURRENT_VERSION = "v54_fixed_widget"
+CURRENT_VERSION = "v55_editor_fix"
 
 _DEFAULT_GLOBALS = [
     ('L_total', 30.0), ('x_pos', 0.0),
@@ -1008,13 +1008,6 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**编辑各层**")
 
-    def _make_editor_callback(idx, wkey):
-        def _cb():
-            v = st.session_state.get(wkey)
-            if isinstance(v, pd.DataFrame):
-                st.session_state.structure[idx]['data'] = v.copy()
-        return _cb
-
     for i, layer in enumerate(st.session_state.structure):
         if layer.get('type') not in LAYER_TYPES:
             layer['type'] = '普通材料'
@@ -1137,17 +1130,15 @@ with st.sidebar:
             rev = st.session_state.get('editor_revisions', {}).get(i, 0)
             widget_key = f"data_editor_{i}_rev{rev}"
 
-            st.data_editor(
+            # v55 修复：使用 st.data_editor 返回值写回，去掉 on_change 回调。
+            edited = st.data_editor(
                 layer['data'],
                 num_rows="dynamic",
                 use_container_width=True,
                 key=widget_key,
-                on_change=_make_editor_callback(i, widget_key),
             )
-            if widget_key in st.session_state:
-                v = st.session_state[widget_key]
-                if isinstance(v, pd.DataFrame):
-                    layer['data'] = v.copy()
+            if isinstance(edited, pd.DataFrame):
+                layer['data'] = edited.copy()
 
             col_dup, col_del_last, col_hint = st.columns([1.2, 1.2, 2])
             with col_dup:
