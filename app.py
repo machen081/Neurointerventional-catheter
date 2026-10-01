@@ -122,6 +122,10 @@ def normalize_structure(structure):
     for layer in structure:
         if not isinstance(layer, dict) or 'data' not in layer:
             continue
+        # ★ 强制 name 为 str
+        if not isinstance(layer.get('name'), str):
+            n = layer.get('name')
+            layer['name'] = str(n) if n is not None else ''
         df = layer['data']
         if not isinstance(df, pd.DataFrame):
             try:
@@ -232,7 +236,10 @@ def structure_to_json_obj(structure):
                 if all(v is None for v in rec.values()):
                     continue
                 records.append(rec)
-        out.append({'name': str(layer.get('name', '') or ''),
+        name_val = layer.get('name', '')
+        if not isinstance(name_val, str):
+            name_val = str(name_val) if name_val is not None else ''
+        out.append({'name': name_val,
                     'type': str(layer.get('type', '普通材料')),
                     'data': records})
     return out
@@ -246,10 +253,13 @@ def json_obj_to_structure(layers_in, warn_list, prefix=''):
             warn_list.append(f'{prefix}第 {i+1} 层不是有效对象，已跳过')
             continue
         ltype = item.get('type', '普通材料')
-        if ltype not in LAYER_TYPES:
+        if not isinstance(ltype, str) or ltype not in LAYER_TYPES:
             warn_list.append(f'{prefix}第 {i+1} 层类型 "{ltype}" 未知，已回退')
             ltype = '普通材料'
-        name = str(item.get('name', '') or f'Layer {i+1}')
+        name_raw = item.get('name', '')
+        if not isinstance(name_raw, str):
+            name_raw = str(name_raw) if name_raw is not None else ''
+        name = name_raw or f'Layer {i+1}'
         expected = LAYER_TYPES[ltype]['columns']
         records = item.get('data', [])
         if isinstance(records, list):
@@ -285,8 +295,11 @@ def schemes_to_json_obj(schemes):
         if not isinstance(s, dict):
             continue
         try:
+            name_val = s.get('name', '')
+            if not isinstance(name_val, str):
+                name_val = str(name_val) if name_val is not None else ''
             out.append({
-                'name': str(s.get('name', '') or ''),
+                'name': name_val,
                 'L_total': _to_native(s.get('L_total', 30.0)),
                 'ea_correction': _to_native(s.get('ea_correction', 1.0)),
                 'kp_correction': _to_native(s.get('kp_correction', 1.0)),
@@ -309,7 +322,10 @@ def json_obj_to_schemes(schemes_in, warn_list):
             warn_list.append(f'第 {i+1} 个方案不是有效对象，已跳过')
             continue
         try:
-            sname = str(item.get('name', '') or f'Scheme {i+1}')
+            sname_raw = item.get('name', '')
+            if not isinstance(sname_raw, str):
+                sname_raw = str(sname_raw) if sname_raw is not None else ''
+            sname = sname_raw or f'Scheme {i+1}'
             prefix = f'方案「{sname}」'
             out.append({
                 'name': sname,
@@ -469,7 +485,7 @@ def check_parameters(structure, L_total, span_L):
     return list(dict.fromkeys(errors)), list(dict.fromkeys(warnings))
 
 # ==================== 会话状态 ====================
-CURRENT_VERSION = "v56_full"
+CURRENT_VERSION = "v57_name_fix"
 
 _DEFAULT_GLOBALS = [
     ('L_total', 30.0), ('x_pos', 0.0),
@@ -970,6 +986,13 @@ with st.sidebar:
             layer['type'] = '普通材料'
             layer['data'] = make_default_layer('普通材料', st.session_state.L_total)
 
+        # ★ 强制 layer['name'] 为 str（防御导入的旧数据里 name 是 None/数字）
+        if not isinstance(layer.get('name'), str):
+            n = layer.get('name')
+            layer['name'] = str(n) if n is not None else f'Layer {i+1}'
+        if layer['name'].strip() == '':
+            layer['name'] = f'Layer {i+1}'
+
         with st.expander(f"第{i+1}层：{layer['name']}（{layer['type']}）", expanded=False):
             if layer['type'] == '普通材料':
                 mat_lib = get_normal_library()
@@ -1041,7 +1064,8 @@ with st.sidebar:
 
             col1, col2, col3 = st.columns([2, 2, 1])
             with col1:
-                new_name = st.text_input("名称", value=layer['name'])
+                # ★ value 也用 str() 兜底
+                new_name = st.text_input("名称", value=str(layer['name']))
                 if new_name != layer['name']:
                     layer['name'] = new_name
             with col2:
