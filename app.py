@@ -60,14 +60,18 @@ def get_wire_library():
         lib[k] = v
     return lib
 
+# ★ 普通材料新增两列：内半径终 / 外半径终（NaN 表示常半径）
 LAYER_TYPES = {
     '普通材料': {
-        'columns': ['起始位置(mm)', '结束位置(mm)', '内半径(mm)', '外半径(mm)',
+        'columns': ['起始位置(mm)', '结束位置(mm)',
+                    '内半径(mm)', '内半径终(mm)',
+                    '外半径(mm)', '外半径终(mm)',
                     '弹性模量(MPa)', '抗拉强度(MPa)'],
         'default': {'起始位置(mm)': 0.0, '结束位置(mm)': 30.0,
-                    '内半径(mm)': 0.27, '外半径(mm)': 0.3048,
+                    '内半径(mm)': 0.27, '内半径终(mm)': np.nan,
+                    '外半径(mm)': 0.3048, '外半径终(mm)': np.nan,
                     '弹性模量(MPa)': 400.0, '抗拉强度(MPa)': 106.2},
-        'caption': '普通材料：各向同性，E_z = E_θ'
+        'caption': '普通材料：内/外半径终留空=常半径；填入不同值=该段内线性渐变（锥度）'
     },
     '编织层': {
         'columns': ['起始位置(mm)', '结束位置(mm)', '内半径(mm)', '外半径(mm)',
@@ -98,13 +102,17 @@ def make_default_layer(layer_type, L_total=30, r_in=0.27, r_out=0.3048):
     d['结束位置(mm)'] = L_total
     d['内半径(mm)'] = r_in
     d['外半径(mm)'] = r_out
+    if layer_type == '普通材料':
+        d['内半径终(mm)'] = np.nan
+        d['外半径终(mm)'] = np.nan
     return pd.DataFrame([d])
 
 def create_default_structure(L_total=30):
     return [
         {'name': 'Hot Melt', 'type': '普通材料',
          'data': pd.DataFrame([{'起始位置(mm)': 0.0, '结束位置(mm)': 30.0,
-                                '内半径(mm)': 0.33, '外半径(mm)': 0.4,
+                                '内半径(mm)': 0.33, '内半径终(mm)': np.nan,
+                                '外半径(mm)': 0.4, '外半径终(mm)': np.nan,
                                 '弹性模量(MPa)': 12.0, '抗拉强度(MPa)': 15.0}])},
         {'name': 'Braid', 'type': '弹簧圈',
          'data': pd.DataFrame([{'起始位置(mm)': 0.0, '结束位置(mm)': 30.0,
@@ -114,7 +122,8 @@ def create_default_structure(L_total=30):
                                 '原始基体体积分数': 0.0}])},
         {'name': 'Coil', 'type': '普通材料',
          'data': pd.DataFrame([{'起始位置(mm)': 0.0, '结束位置(mm)': 30.0,
-                                '内半径(mm)': 0.27, '外半径(mm)': 0.3048,
+                                '内半径(mm)': 0.27, '内半径终(mm)': np.nan,
+                                '外半径(mm)': 0.3048, '外半径终(mm)': np.nan,
                                 '弹性模量(MPa)': 400.0, '抗拉强度(MPa)': 106.2}])},
     ]
 
@@ -122,7 +131,6 @@ def normalize_structure(structure):
     for layer in structure:
         if not isinstance(layer, dict) or 'data' not in layer:
             continue
-        # ★ 强制 name 为 str
         if not isinstance(layer.get('name'), str):
             n = layer.get('name')
             layer['name'] = str(n) if n is not None else ''
@@ -147,8 +155,8 @@ def normalize_structure(structure):
         if list(df.columns) != expected_cols:
             for col in expected_cols:
                 if col not in df.columns:
-                    df[col] = LAYER_TYPES[layer['type']]['default'].get(col, 0.0)
-            layer['data'] = df[expected_cols].reset_index(drop=True)
+                    layer['data'][col] = LAYER_TYPES[layer['type']]['default'].get(col, np.nan)
+            layer['data'] = layer['data'][expected_cols].reset_index(drop=True)
         else:
             layer['data'] = df.reset_index(drop=True)
     return structure
@@ -201,8 +209,34 @@ def clear_all_layer_editor_state():
             st.session_state.pop(k, None)
     st.session_state.editor_revisions = {}
 
+# ==================== 锥度半径插值 ====================
+def get_segment_radii_at(row, x):
+    """
+    返回该段在位置 x 处的 (r_in, r_out)。
+    - 如果 内半径终(mm)/外半径终(mm) 有值，则在段内线性插值
+    - 否则使用 内半径(mm)/外半径(mm) 作为常量
+    """
+    r_in_s = safe_float(row.get('内半径(mm)', None), None)
+    r_out_s = safe_float(row.get('外半径(mm)', None), None)
+    if r_in_s is None or r_out_s is None:
+        return None, None
+    r_in_e = safe_float(row.get('内半径终(mm)', None), None)
+    r_out_e = safe_float(row.get('外半径终(mm)', None), None)
+    if r_in_e is None: r_in_e = r_in_s
+    if r_out_e is None: r_out_e = r_out_s
+    s = safe_float(row.get('起始位置(mm)', None), None)
+    e = safe_float(row.get('结束位置(mm)', None), None)
+    if s is not None and e is not None and e > s:
+        t = (x - s) / (e - s)
+        t = max(0.0, min(1.0, t))
+    else:
+        t = 0.0
+    r_in = r_in_s + (r_in_e - r_in_s) * t
+    r_out = r_out_s + (r_out_e - r_out_s) * t
+    return float(r_in), float(r_out)
+
 # ==================== JSON 导入导出 ====================
-MODEL_FILE_VERSION = 3
+MODEL_FILE_VERSION = 5
 
 def _to_native(v):
     if v is None:
@@ -280,7 +314,7 @@ def json_obj_to_structure(layers_in, warn_list, prefix=''):
                     warn_list.append(f'{prefix}第 {i+1} 层缺少列：{"、".join(missing)}，已补默认值')
                 for c in expected:
                     if c not in df.columns:
-                        df[c] = LAYER_TYPES[ltype]['default'].get(c, 0.0)
+                        df[c] = LAYER_TYPES[ltype]['default'].get(c, np.nan)
                 df = df[expected].copy()
                 for c in expected:
                     df[c] = pd.to_numeric(df[c], errors='coerce')
@@ -307,6 +341,7 @@ def schemes_to_json_obj(schemes):
                 'eta_bond': _to_native(s.get('eta_bond', 0.8)),
                 'softening_c': _to_native(s.get('softening_c', 1.0)),
                 'braid_crush_factor': _to_native(s.get('braid_crush_factor', 1.0)),
+                'collapse_model': str(s.get('collapse_model', 'weighted')),
                 'structure': structure_to_json_obj(s.get('structure', [])),
             })
         except Exception:
@@ -327,6 +362,9 @@ def json_obj_to_schemes(schemes_in, warn_list):
                 sname_raw = str(sname_raw) if sname_raw is not None else ''
             sname = sname_raw or f'Scheme {i+1}'
             prefix = f'方案「{sname}」'
+            cm = item.get('collapse_model', 'weighted')
+            if cm not in ('weakest', 'weighted'):
+                cm = 'weighted'
             out.append({
                 'name': sname,
                 'L_total': safe_float(item.get('L_total', 30.0), 30.0),
@@ -336,6 +374,7 @@ def json_obj_to_schemes(schemes_in, warn_list):
                 'eta_bond': safe_float(item.get('eta_bond', 0.8), 0.8),
                 'softening_c': safe_float(item.get('softening_c', 1.0), 1.0),
                 'braid_crush_factor': safe_float(item.get('braid_crush_factor', 1.0), 1.0),
+                'collapse_model': cm,
                 'structure': json_obj_to_structure(item.get('structure', []), warn_list, prefix=f'{prefix} ')
             })
         except Exception as e:
@@ -376,6 +415,10 @@ def parse_model_payload(payload, L_total_fallback=30.0):
         'tp_offset_mm': pick('tp_offset_mm', 0.0, -100.0, 100.0),
         'tp_offset_N': pick('tp_offset_N', 0.0, -1000.0, 1000.0),
     }
+    cm_payload = payload.get('collapse_model', 'weighted')
+    if cm_payload not in ('weakest', 'weighted'):
+        cm_payload = 'weighted'
+    params['collapse_model'] = cm_payload
     cmn = payload.get('custom_materials_normal', {})
     cmw = payload.get('custom_materials_wire', {})
     custom_normal = cmn if isinstance(cmn, dict) else {}
@@ -400,7 +443,7 @@ def parse_json_text(raw_text, L_total_fallback=30.0):
         raise ValueError(f'JSON 格式错误：第 {e.lineno} 行第 {e.colno} 列 — {e.msg}')
     return parse_model_payload(payload, L_total_fallback=L_total_fallback)
 
-# ==================== 参数校验（完整版） ====================
+# ==================== 参数校验 ====================
 def check_parameters(structure, L_total, span_L):
     errors, warnings = [], []
     for i, layer in enumerate(structure):
@@ -421,6 +464,8 @@ def check_parameters(structure, L_total, span_L):
             end = safe_float(end_raw, None)
             r_in = safe_float(r_in_raw, None)
             r_out = safe_float(r_out_raw, None)
+            r_in_e = safe_float(row.get('内半径终(mm)', None), None)
+            r_out_e = safe_float(row.get('外半径终(mm)', None), None)
             missing = []
             if start is None: missing.append('起始位置')
             if end is None: missing.append('结束位置')
@@ -439,6 +484,12 @@ def check_parameters(structure, L_total, span_L):
                 errors.append(f"第 {i+1} 层（{name}）第 {j+1} 段：内半径为负")
             if r_out <= r_in:
                 errors.append(f"第 {i+1} 层（{name}）第 {j+1} 段：外半径不大于内半径")
+            if r_in_e is not None:
+                if r_in_e < 0:
+                    errors.append(f"第 {i+1} 层（{name}）第 {j+1} 段：内半径终为负")
+            if r_out_e is not None:
+                if r_out_e <= (r_in_e if r_in_e is not None else r_in):
+                    errors.append(f"第 {i+1} 层（{name}）第 {j+1} 段：外半径终不大于内半径终")
             if layer['type'] == '普通材料':
                 E = safe_float(row.get('弹性模量(MPa)', None), 0.0)
                 sig = safe_float(row.get('抗拉强度(MPa)', None), 0.0)
@@ -471,7 +522,9 @@ def check_parameters(structure, L_total, span_L):
             df = layer['data']
             if df is not None and not df.empty:
                 try:
-                    cm = df['外半径(mm)'].apply(lambda v: safe_float(v, 0.0)).max()
+                    col = df['外半径(mm)'].apply(lambda v: safe_float(v, 0.0))
+                    col_e = df['外半径终(mm)'].apply(lambda v: safe_float(v, 0.0)) if '外半径终(mm)' in df.columns else col
+                    cm = max(col.max(), col_e.max())
                     if cm is not None and not pd.isna(cm):
                         max_r_out = max(max_r_out, float(cm))
                 except Exception:
@@ -485,7 +538,7 @@ def check_parameters(structure, L_total, span_L):
     return list(dict.fromkeys(errors)), list(dict.fromkeys(warnings))
 
 # ==================== 会话状态 ====================
-CURRENT_VERSION = "v57_name_fix"
+CURRENT_VERSION = "v59_taper"
 
 _DEFAULT_GLOBALS = [
     ('L_total', 30.0), ('x_pos', 0.0),
@@ -494,6 +547,7 @@ _DEFAULT_GLOBALS = [
     ('braid_crush_factor', 1.0),
     ('tp_offset_mm', 0.0), ('tp_offset_N', 0.0),
     ('tp_delta_input', 0.5),
+    ('collapse_model', 'weighted'),
     ('saved_schemes', []),
     ('custom_materials_normal', {}), ('custom_materials_wire', {}),
     ('editor_revisions', {}),
@@ -533,7 +587,7 @@ def find_hot_melt_props(structure, x):
         row = find_segment(layer['data'], x)
         if row is None or layer['type'] != '普通材料':
             continue
-        r_out_v = safe_float(row.get('外半径(mm)', None), None)
+        r_in_v, r_out_v = get_segment_radii_at(row, x)
         E_v = safe_float(row.get('弹性模量(MPa)', None), None)
         sig_v = safe_float(row.get('抗拉强度(MPa)', None), 0.0)
         if r_out_v is None or r_out_v <= 0 or E_v is None:
@@ -641,8 +695,11 @@ def compute_at_x(structure, x, eta_bond=1.0, braid_crush_factor=1.0):
             ltype = layer['type']
             alpha = None; V_void = None
             Fu_override = None; Fu_fiber = 0.0; Fu_matrix_contrib = 0.0
-            r_in_v = safe_float(row.get('内半径(mm)', None), None)
-            r_out_v = safe_float(row.get('外半径(mm)', None), None)
+            if ltype == '普通材料':
+                r_in_v, r_out_v = get_segment_radii_at(row, x)
+            else:
+                r_in_v = safe_float(row.get('内半径(mm)', None), None)
+                r_out_v = safe_float(row.get('外半径(mm)', None), None)
             if r_in_v is None or r_out_v is None or r_out_v <= r_in_v:
                 continue
             A_total = np.pi * (r_out_v**2 - r_in_v**2)
@@ -757,6 +814,38 @@ def compute_effective_const(tr):
     const_thin = np.pi / 4 - 2 / np.pi
     return const_thin * (1.0 + 0.5 * tr + 1.0 * tr * tr)
 
+def merge_layers_for_crush(layers, tol_E_rel=0.01, tol_r=1e-3):
+    if not layers:
+        return []
+    sorted_layers = sorted(layers, key=lambda l: l['r_in'])
+    merged = []
+    for l in sorted_layers:
+        l_copy = {
+            'name': l.get('name', ''),
+            'type': l.get('type', '普通材料'),
+            'r_in': l['r_in'],
+            'r_out': l['r_out'],
+            'E_theta': l['E_theta'],
+            'is_merged': False,
+            '_merged_from': [l.get('name', '')],
+        }
+        if not merged:
+            merged.append(l_copy)
+            continue
+        prev = merged[-1]
+        both_normal = (prev['type'] == '普通材料' and l_copy['type'] == '普通材料')
+        E_a, E_b = prev['E_theta'], l_copy['E_theta']
+        E_den = max(abs(E_a), abs(E_b), 1e-9)
+        same_E = abs(E_a - E_b) / E_den < tol_E_rel
+        adjacent = abs(prev['r_out'] - l_copy['r_in']) < tol_r
+        if both_normal and same_E and adjacent:
+            prev['r_out'] = l_copy['r_out']
+            prev['is_merged'] = True
+            prev['_merged_from'].append(l_copy.get('name', ''))
+        else:
+            merged.append(l_copy)
+    return merged
+
 def compute_stiffness(layers, ea_corr=1.0, kp_corr=1.0):
     EA_c, EI_c, EI_theta_bend_c, EA_theta_c = [], [], [], []
     for l in layers:
@@ -769,8 +858,14 @@ def compute_stiffness(layers, ea_corr=1.0, kp_corr=1.0):
         EA_theta_c.append(compute_wall_axial_stiffness(E_theta, r_in, r_out))
     EA = sum(EA_c) * ea_corr
     EI = sum(EI_c)
-    EI_theta_bend = sum(EI_theta_bend_c)
     EA_theta = sum(EA_theta_c)
+
+    merged_layers = merge_layers_for_crush(layers)
+    EI_theta_bend_merged = sum(
+        compute_wall_bending_stiffness(m['E_theta'], m['r_in'], m['r_out'])
+        for m in merged_layers
+    ) if merged_layers else 0.0
+
     if layers:
         r0 = min(l['r_in'] for l in layers)
         rn = max(l['r_out'] for l in layers)
@@ -778,15 +873,19 @@ def compute_stiffness(layers, ea_corr=1.0, kp_corr=1.0):
         thick_ratio = (rn - r0) / R if R > 0 else 0
         const_eff = compute_effective_const(thick_ratio)
         compliance = 0.0
-        if EI_theta_bend > 0:
-            compliance += const_eff * R**3 / EI_theta_bend
+        if EI_theta_bend_merged > 0:
+            compliance += const_eff * R**3 / EI_theta_bend_merged
         if EA_theta > 0:
             compliance += const_eff * R / EA_theta
         Kp_raw = 1.0 / compliance if compliance > 0 else 0.0
         model_used = "thin-wall" if thick_ratio < 0.08 else \
                      "transition" if thick_ratio < 0.15 else "thick-wall"
         Kp = Kp_raw * kp_corr
-        Kp_c = [ei / EI_theta_bend * Kp for ei in EI_theta_bend_c] if EI_theta_bend > 0 else [0.0]*len(layers)
+        sum_orig = sum(EI_theta_bend_c) if EI_theta_bend_c else 0.0
+        if sum_orig > 0:
+            Kp_c = [ei / sum_orig * Kp for ei in EI_theta_bend_c]
+        else:
+            Kp_c = [0.0] * len(layers)
     else:
         Kp = 0.0; Kp_c = []; model_used = "N/A"; thick_ratio = 0.0
     return EA, EI, Kp, EA_c, EI_c, Kp_c, model_used, thick_ratio
@@ -875,7 +974,7 @@ def compute_bending_yield(layers):
                               'is_valid': is_valid})
     return M_y, ctrl_layer, candidates, contributions
 
-def compute_collapse_force(layers):
+def compute_collapse_force(layers, model='weighted'):
     if not layers:
         return 0.0, None, [], []
     valid_indices = [i for i, l in enumerate(layers)
@@ -883,7 +982,8 @@ def compute_collapse_force(layers):
                      and (l['r_out'] - l['r_in']) > 0]
     if not valid_indices:
         return 0.0, None, [], []
-    EI_theta_list = [compute_wall_bending_stiffness(l['E_theta'], l['r_in'], l['r_out']) for l in layers]
+    EI_theta_list = [compute_wall_bending_stiffness(l['E_theta'], l['r_in'], l['r_out'])
+                     for l in layers]
     EI_theta_total = sum(EI_theta_list[i] for i in valid_indices)
     if EI_theta_total <= 0:
         return 0.0, None, [], []
@@ -891,18 +991,30 @@ def compute_collapse_force(layers):
     rn = max(l['r_out'] for l in layers)
     R = (r0 + rn) / 2
     C = 0.318
-    candidates = []
+
+    per_layer = []
     for i in valid_indices:
         l = layers[i]
         E_theta = l['E_theta']; t_i = l['r_out'] - l['r_in']
         sigma_uts = l.get('sigma_uts', 0.0)
         F_i = sigma_uts * EI_theta_total * 2 / (E_theta * C * R * t_i)
-        candidates.append({'layer': l['name'], 'F_c': F_i, 'E_theta': E_theta,
-                           't': t_i, 'sigma_uts': sigma_uts,
-                           'EI_theta_i': EI_theta_list[i]})
-    candidates.sort(key=lambda c: c['F_c'])
-    F_c = candidates[0]['F_c']
-    ctrl_layer = candidates[0]['layer']
+        per_layer.append({'layer': l['name'], 'F_c': F_i,
+                          'E_theta': E_theta, 't': t_i,
+                          'sigma_uts': sigma_uts,
+                          'EI_theta_i': EI_theta_list[i]})
+
+    if model == 'weakest':
+        candidates = sorted(per_layer, key=lambda c: c['F_c'])
+        F_c = candidates[0]['F_c']
+        ctrl_layer = candidates[0]['layer']
+    else:
+        weighted_sum = sum(c['EI_theta_i'] * c['F_c'] for c in per_layer)
+        F_c = weighted_sum / EI_theta_total if EI_theta_total > 0 else 0.0
+        ctrl_layer = "刚度加权（各层协同屈服）"
+        candidates = sorted(per_layer, key=lambda c: c['F_c'])
+        for c in candidates:
+            c['is_weighted_ctrl'] = True
+
     M_max = C * F_c * R
     contributions = []
     for i, l in enumerate(layers):
@@ -915,7 +1027,7 @@ def compute_collapse_force(layers):
             M_actual = 0.0; pct = 0.0
         contributions.append({'layer': l['name'], 'EI_theta_i': EI_theta_i,
                               'M_actual': M_actual, 'pct': pct,
-                              'is_ctrl': (l['name'] == ctrl_layer),
+                              'is_ctrl': (model == 'weakest' and l['name'] == ctrl_layer),
                               'is_valid': is_valid})
     return F_c, ctrl_layer, candidates, contributions
 
@@ -926,7 +1038,7 @@ def compute_crush_force_nonlinear(Kp, D_outer, dD, c=1.0):
     return Kp * dD / (1.0 + c * dD / D_outer)
 
 def compute_along_length(structure, L_total, ea_corr=1.0, kp_corr=1.0, eta_bond=1.0,
-                          braid_crush_factor=1.0, n=200):
+                          braid_crush_factor=1.0, n=200, collapse_model='weighted'):
     xs = np.linspace(0, L_total, n)
     EA_arr = np.zeros(n); EI_arr = np.zeros(n); Kp_arr = np.zeros(n)
     Fu_arr = np.zeros(n); My_arr = np.zeros(n); Fc_arr = np.zeros(n)
@@ -937,7 +1049,7 @@ def compute_along_length(structure, L_total, ea_corr=1.0, kp_corr=1.0, eta_bond=
             EA, EI, Kp, _, _, _, _, _ = compute_stiffness(layers, ea_corr, kp_corr)
             Fu, _ = compute_axial_strength(layers)
             My, _, _, _ = compute_bending_yield(layers)
-            Fc, _, _, _ = compute_collapse_force(layers)
+            Fc, _, _, _ = compute_collapse_force(layers, model=collapse_model)
             EA_arr[i] = EA; EI_arr[i] = EI; Kp_arr[i] = Kp
             Fu_arr[i] = Fu; My_arr[i] = My; Fc_arr[i] = Fc
         except Exception:
@@ -982,11 +1094,12 @@ with st.sidebar:
 
     to_delete = None
     for i, layer in enumerate(st.session_state.structure):
+        if not isinstance(layer, dict):
+            continue
         if layer.get('type') not in LAYER_TYPES:
             layer['type'] = '普通材料'
             layer['data'] = make_default_layer('普通材料', st.session_state.L_total)
 
-        # ★ 强制 layer['name'] 为 str（防御导入的旧数据里 name 是 None/数字）
         if not isinstance(layer.get('name'), str):
             n = layer.get('name')
             layer['name'] = str(n) if n is not None else f'Layer {i+1}'
@@ -1064,7 +1177,6 @@ with st.sidebar:
 
             col1, col2, col3 = st.columns([2, 2, 1])
             with col1:
-                # ★ value 也用 str() 兜底
                 new_name = st.text_input("名称", value=str(layer['name']))
                 if new_name != layer['name']:
                     layer['name'] = new_name
@@ -1109,6 +1221,11 @@ with st.sidebar:
                         last_end = safe_float(last_row.get('结束位置(mm)', None), None)
                         if last_end is not None:
                             last_row['起始位置(mm)'] = last_end
+                        # 复制时终半径清空
+                        if '内半径终(mm)' in last_row:
+                            last_row['内半径终(mm)'] = np.nan
+                        if '外半径终(mm)' in last_row:
+                            last_row['外半径终(mm)'] = np.nan
                         new_row_df = pd.DataFrame([last_row])
                         try:
                             new_row_df = new_row_df[list(layer['data'].columns)]
@@ -1131,7 +1248,6 @@ with st.sidebar:
         clear_all_layer_editor_state()
         st.rerun()
 
-    # 修正系数
     st.markdown("---")
     st.markdown("**刚度修正系数**")
     _ea_c = st.number_input("轴向刚度 EA 修正系数", min_value=0.01, max_value=2.0,
@@ -1152,6 +1268,18 @@ with st.sidebar:
                             value=float(st.session_state.braid_crush_factor),
                             key="braid_crush_factor_input_widget")
     st.session_state.braid_crush_factor = float(_bcf)
+
+    st.markdown("---")
+    st.markdown("**抗压扁模型选择**")
+    _collapse_opts = ["刚度加权（推荐，符合宏观实验）", "最弱层控制（保守设计）"]
+    _cur_cm = st.session_state.get('collapse_model', 'weighted')
+    _cur_idx = 0 if _cur_cm == 'weighted' else 1
+    _collapse_choice = st.radio(
+        "屈服判定方式", _collapse_opts, index=_cur_idx,
+        key="collapse_model_widget",
+        help="刚度加权：整体按各层 EI_θ 加权平均屈服，E 变大不会降低 Fc（推荐）。\n"
+             "最弱层控制：任一层先屈服整体即失效，偏保守。")
+    st.session_state.collapse_model = 'weighted' if _collapse_choice.startswith("刚度加权") else 'weakest'
 
     st.markdown("---")
     st.markdown("**抗压扁非线性参数**")
@@ -1179,17 +1307,14 @@ with st.sidebar:
     _tp_mm = st.number_input("位移截距 (mm)", min_value=-100.0, max_value=100.0,
                               step=0.1, format="%.2f",
                               value=float(st.session_state.tp_offset_mm),
-                              key="tp_offset_mm_input_widget",
-                              help="试验曲线的位移零点修正。")
+                              key="tp_offset_mm_input_widget")
     st.session_state.tp_offset_mm = float(_tp_mm)
     _tp_N = st.number_input("力截距 (N)", min_value=-1000.0, max_value=1000.0,
                              step=0.01, format="%.2f",
                              value=float(st.session_state.tp_offset_N),
-                             key="tp_offset_N_input_widget",
-                             help="试验曲线的力零点修正。")
+                             key="tp_offset_N_input_widget")
     st.session_state.tp_offset_N = float(_tp_N)
 
-    # 材料库管理
     st.markdown("---")
     st.markdown("**📚 材料库管理**")
     with st.expander("添加 / 删除自定义材料", expanded=False):
@@ -1251,7 +1376,6 @@ with st.sidebar:
                     del st.session_state.custom_materials_wire[k]
                     st.rerun()
 
-    # 方案管理
     st.markdown("---")
     st.markdown("**💾 方案管理**")
     scheme_name = st.text_input("方案名称",
@@ -1268,7 +1392,8 @@ with st.sidebar:
                       'eta_bond': st.session_state.eta_bond,
                       'softening_c': st.session_state.softening_c,
                       'span_L': st.session_state.span_L,
-                      'braid_crush_factor': st.session_state.braid_crush_factor}
+                      'braid_crush_factor': st.session_state.braid_crush_factor,
+                      'collapse_model': st.session_state.get('collapse_model', 'weighted')}
             existing_idx = next((idx for idx, s in enumerate(st.session_state.saved_schemes)
                                  if s['name'] == scheme_name), None)
             if existing_idx is not None:
@@ -1297,12 +1422,13 @@ with st.sidebar:
                         'softening_c': s['softening_c'],
                         'span_L': s['span_L'],
                         'braid_crush_factor': s.get('braid_crush_factor', 1.0),
+                        'collapse_model': s.get('collapse_model', 'weighted'),
                     }
                     st.session_state['_pending_widget_reset'] = [
                         'L_total_input_widget', 'ea_correction_input_widget',
                         'kp_correction_input_widget', 'braid_crush_factor_input_widget',
                         'softening_c_input_widget', 'eta_bond_input_widget',
-                        'span_L_input_widget',
+                        'span_L_input_widget', 'collapse_model_widget',
                     ]
                     clear_all_layer_editor_state()
                     st.rerun()
@@ -1311,7 +1437,6 @@ with st.sidebar:
                     st.session_state.saved_schemes.pop(idx)
                     st.rerun()
 
-    # 模型导入导出
     st.markdown("---")
     st.markdown("**📦 模型导入 / 导出**")
     export_payload = {
@@ -1328,6 +1453,7 @@ with st.sidebar:
         'braid_crush_factor': float(st.session_state.braid_crush_factor),
         'tp_offset_mm': float(st.session_state.tp_offset_mm),
         'tp_offset_N': float(st.session_state.tp_offset_N),
+        'collapse_model': str(st.session_state.get('collapse_model', 'weighted')),
         'custom_materials_normal': st.session_state.custom_materials_normal,
         'custom_materials_wire': st.session_state.custom_materials_wire,
         'structure': structure_to_json_obj(st.session_state.structure),
@@ -1409,6 +1535,7 @@ with st.sidebar:
                         'braid_crush_factor': new_params['braid_crush_factor'],
                         'tp_offset_mm': new_params['tp_offset_mm'],
                         'tp_offset_N': new_params['tp_offset_N'],
+                        'collapse_model': new_params.get('collapse_model', 'weighted'),
                         'x_pos': 0.0,
                     }
                     st.session_state['_pending_widget_reset'] = [
@@ -1417,6 +1544,7 @@ with st.sidebar:
                         'softening_c_input_widget', 'eta_bond_input_widget',
                         'span_L_input_widget', 'tp_offset_mm_input_widget',
                         'tp_offset_N_input_widget', 'x_pos_slider_widget',
+                        'collapse_model_widget',
                     ]
                     clear_all_layer_editor_state()
                     st.rerun()
@@ -1431,6 +1559,7 @@ with st.sidebar:
             'span_L': 30.0, 'eta_bond': 0.8, 'softening_c': 1.0,
             'braid_crush_factor': 1.0,
             'tp_offset_mm': 0.0, 'tp_offset_N': 0.0,
+            'collapse_model': 'weighted',
         }
         st.session_state['_pending_widget_reset'] = [
             'L_total_input_widget', 'ea_correction_input_widget',
@@ -1438,6 +1567,7 @@ with st.sidebar:
             'softening_c_input_widget', 'eta_bond_input_widget',
             'span_L_input_widget', 'tp_offset_mm_input_widget',
             'tp_offset_N_input_widget', 'x_pos_slider_widget',
+            'collapse_model_widget',
         ]
         st.rerun()
 
@@ -1456,8 +1586,8 @@ braid_crush_factor = st.session_state.braid_crush_factor
 saved_schemes = st.session_state.saved_schemes
 tp_offset_mm = st.session_state.tp_offset_mm
 tp_offset_N = st.session_state.tp_offset_N
+collapse_model = st.session_state.get('collapse_model', 'weighted')
 
-# 参数校验（完整版）
 errors_check, warnings_check = check_parameters(structure, L_total, L_span)
 if errors_check:
     with st.expander(f"❌ 参数校验：发现 {len(errors_check)} 个错误", expanded=True):
@@ -1469,7 +1599,7 @@ if warnings_check:
             st.warning(w)
 
 # ============================================================
-# 📖 使用说明书（15 节完整版）
+# 📖 使用说明书
 # ============================================================
 st.markdown("## 📖 使用说明书")
 st.caption("每个模块独立展开。建议先看第 1 节快速开始，标定时看第 11 节。")
@@ -1478,15 +1608,15 @@ with st.expander("1. 快速开始", expanded=False):
     st.markdown("""
 **五分钟上手：**
 
-1. **看默认结构**：程序启动时已加载 3 层示例结构（Hot Melt → 弹簧圈 → PTFE）
-2. **拖动滑块**：主区域中间的 "Axial position x (mm)" 滑块可查看不同位置
+1. **看默认结构**：程序启动时已加载 3 层示例结构
+2. **拖动滑块**：主区域的 "轴向位置 x (mm)" 滑块可查看不同位置
 3. **看六个指标**：顶部有 EA/EI/Kp + Fu/My/Fc 六个指标
 4. **改参数**：侧边栏展开任意层修改数值
 5. **保存方案**：改好后在 "💾 方案管理" 保存
 
-**分段设置**：每层底部有"📋 复制最后一行"按钮。
+**锥度段**：普通材料层的 `内半径终` / `外半径终` 两列留空=常半径；填入不同值=该段内线性渐变。例如 240-260mm 想让外径从 0.45 平滑到 0.50，就把 `外半径=0.45`、`外半径终=0.50`。
 
-**参数校验**：程序启动时会自动检查参数合理性。
+**抗压扁模型**：侧边栏可选"刚度加权（推荐）"或"最弱层控制（保守）"。
     """)
 
 with st.expander("2. 界面总览", expanded=False):
@@ -1495,50 +1625,42 @@ with st.expander("2. 界面总览", expanded=False):
 
 | 区块 | 内容 |
 |---|---|
-| 单位约定 | 全局单位说明 |
 | 参数校验 | 自动检查错误和警告 |
 | 使用说明书 | 分模块展开 |
 | 轴向位置滑块 | 选择截面位置 |
 | 刚度分析 | 3 指标 + 3 曲线 + 力-位移曲线 + 方案对比 + 截面图 |
-| 强度分析 | 拉伸/弯曲/压扁屈服 + 各层贡献表 + **三点弯曲弹性段计算器** |
+| 强度分析 | 拉伸/弯曲/压扁屈服 + 各层贡献表 + 三点弯曲弹性段计算器 |
 | 参数明细表 | 当前截面所有层参数 |
 | 导出功能 | 3 个导出按钮 |
 
-**侧边栏：** 导管结构、修正系数、编织折减、非线性参数、抗拉参数、三点弯曲、材料库管理、方案管理、导入导出。
+**侧边栏：** 导管结构、修正系数、编织折减、抗压扁模型、非线性参数、抗拉参数、三点弯曲、材料库管理、方案管理、导入导出。
     """)
 
 with st.expander("3. 单位说明", expanded=False):
     st.markdown("""
-**全局单位约定**
-
 | 量 | 单位 | 含义 |
 |---|---|---|
-| EA | N | 轴向刚度，本身就是力单位 |
-| EI | N·mm² | 弯曲刚度，是力矩乘长度 |
-| Kp | N/mm | 抗压扁刚度，每压 1 mm 需要多少力 |
-| My | N·mm | 弯曲屈服力矩，是力矩 |
-| Fc | N | 压扁屈服力，是力 |
-| Fu | N | 拉伸力，是力 |
-| Fy_bending | N | 三点弯曲力，是力 |
-
-**哪些量能直接读成 N**
-
-- 能直接读：EA、Fu、Fc、Fy_bending（本身已是 N）
-- 不能直接读：EI、My、Kp（需要额外加载条件才能转成力）
+| EA | N | 轴向刚度 |
+| EI | N·mm² | 弯曲刚度 |
+| Kp | N/mm | 抗压扁刚度 |
+| My | N·mm | 弯曲屈服力矩 |
+| Fc | N | 压扁屈服力 |
+| Fu | N | 拉伸力 |
 
 **EI 怎么转成 N**
 
-- 三点弯曲（跨距 L，中心加载）：F = 48 · EI · δ / L³（δ 是下压量）
+- 三点弯曲（跨距 L，中心加载）：F = 48 · EI · δ / L³
 - 悬臂梁（末端位移 δ）：F = 3 · EI · δ / L³
-
-要得到具体的力，必须知道跨距 L、位移 δ 或曲率 κ。
     """)
 
 with st.expander("4. 输入参数详解", expanded=False):
     st.markdown("""
-**普通材料**：起始/结束位置、内/外半径、弹性模量、抗拉强度。
+**普通材料**：起始/结束位置、内半径起/终、外半径起/终、弹性模量、抗拉强度。
 
-**编织层**：起始/结束位置、内/外半径、扁丝宽度/厚度、股数（每方向）、每束根数、每英寸交叉数、丝材模量、丝材抗拉强度、原始基体体积分数。
+- `内半径终`、`外半径终` 留空 → 常半径段（与起点半径相同）
+- 填入不同值 → 该段内线性渐变（锥度段）
+
+**编织层**：起始/结束位置、内/外半径、扁丝宽度/厚度、股数、每束根数、每英寸交叉数、丝材模量、丝材抗拉强度、原始基体体积分数。
 
 **弹簧圈**：起始/结束位置、内/外半径、丝径、螺距、丝材模量、丝材抗拉强度、原始基体体积分数。
     """)
@@ -1547,7 +1669,7 @@ with st.expander("5. 材料库使用", expanded=False):
     st.markdown("""
 每层顶部有"📚 材料库"下拉菜单。选材料 → 选应用范围 → 点"填入"。
 
-**普通材料**：PTFE（块体/挤出管）、Pebax 2533/3533/4033/4533/5533/6333/7233、尼龙 12/6、聚氨酯、HDPE。
+**普通材料**：PTFE、Pebax 2533~7233、尼龙 12/6、聚氨酯、HDPE。
 
 **丝材**：不锈钢 304/316LVM、镍钛合金、钴铬合金 L605、铂钨合金。
 
@@ -1558,33 +1680,28 @@ with st.expander("6. 刚度分析", expanded=False):
     st.markdown("""
 三个刚度指标：EA (N)、EI (N·mm²)、Kp (N/mm)。
 
-**各层刚度贡献明细表**：显示每层对 EA、EI、Kp 的贡献值和占比。
+**Kp 计算时的层合并**：相邻的、材料相同（E_θ 相同）、半径紧贴的普通材料层会被自动合并成一层厚壁再计算 Kp。
 
-**弯曲刚度图的解读**：
-
-- 横轴是位置，纵轴是 EI
-- 曲线是阶梯状：每个台阶对应一个结构段
-- 台阶高 = 那段很硬；台阶低 = 那段很软
-- 灰色虚线 = 当前截面位置
+**锥度段的影响**：锥度段在 200 个采样点上逐点插值半径，因此 Kp、EA、EI 曲线会呈现平滑过渡，而不是台阶突变。
     """)
 
 with st.expander("7. 强度分析", expanded=False):
     st.markdown("""
 **三种强度模式：**
 
-| 模式 | 指标 | 是否有控制层 |
+| 模式 | 指标 | 判定方式 |
 |---|---|---|
-| 拉伸起始屈服 | Fu_y | 有 |
-| 弯曲屈服 | My | 有 |
-| 压扁屈服 | Fc | 有 |
+| 拉伸起始屈服 | Fu_y | 最早达到 σ_uts 的层控制 |
+| 弯曲屈服 | My | 最早达到 σ_uts 的层控制 |
+| 压扁屈服 | Fc | 可选"最弱层控制"或"刚度加权" |
 
-**弯曲屈服表**包含"三点弯曲力 (N)" 和"预计实验读数 (N)"两列。
+**刚度加权模型**：Fc = Σ(EI_θ_i · Fc_i) / EI_θ_总。E 变大不降低 Fc，符合宏观实验趋势。**推荐**。
+
+**最弱层控制模型**：Fc = min(Fc_i)。任一层先屈服整体即失效。偏保守。
     """)
 
 with st.expander("8. 三点弯曲弹性段计算器", expanded=False):
     st.markdown("""
-**用途**：输入一个下压距离，得到弹性段对应的力。
-
 **公式**：F = 48 · EI · δ / L³
 
 **输出**：弹性段斜率、力、屈服点位移、状态判断。
@@ -1594,7 +1711,7 @@ with st.expander("9. 非线性力-位移曲线", expanded=False):
     st.markdown("""
 F(ΔD) = Kp · ΔD / (1 + c · ΔD / D)
 
-软化系数 c：0（线性）、1.0（中等，默认）、3.0（强软化）。
+软化系数 c：0（线性）、1.0（中等）、3.0（强软化）。
     """)
 
 with st.expander("10. 修正系数一览", expanded=False):
@@ -1621,12 +1738,7 @@ with st.expander("11. 实验标定流程", expanded=False):
 
 ## 11.4 三点弯曲实验
 
-### 反推实测 EI
 EI_exp = k · L³ / 48
-
-### 与工具对比
-
-EA 修正系数 = EI_exp / EI_theory
 
 ## 11.5 保守默认值
 
@@ -1658,36 +1770,23 @@ with st.expander("13. 导出功能", expanded=False):
 
 with st.expander("14. 常见问题", expanded=False):
     st.markdown("""
-**Q1：算出来 Kp 太大？**
-A：Kp 是线性小变形刚度，薄壁需乘 0.3~0.5，厚壁需乘 0.6~0.8。
+**Q1：为什么加了锥度段后曲线还是不平滑？**
+A：锥度插值按 x 逐点计算，曲线会平滑。如果看不到平滑，检查 `外半径终` 是否真的填了不同值。
 
-**Q2：为什么改了模量，Fu 没变？**
-A：Fu 只取决于抗拉强度。
+**Q2：为什么"最弱层控制"下，材料变硬 Fc 反而下降？**
+A：E 变大时该层分摊的弯矩变多，自己先到 σ_uts。改用"刚度加权"即可消除。
 
-**Q3：编织层压扁折减怎么用？**
-A：默认 1.0。已知编织层为网眼结构时可用 0.7~0.9。
-
-**Q4：改了参数图表没更新？**
+**Q3：改了参数图表没更新？**
 A：在 data_editor 里按 Ctrl+Enter 或点击表格外部提交。
 
-**Q5：Excel 导出报错？**
+**Q4：Excel 导出报错？**
 A：需要安装 openpyxl。
 
-**Q6：怎么把模型带到另一台电脑？**
-A：导出 JSON → 在新环境导入。
+**Q5：锥度段和阶梯段混用会有问题吗？**
+A：不会。每个段独立判断：有终值则渐变，无终值则常半径。
 
-**Q7：粘贴文本方式怎么用？**
-A：用记事本打开导出的 JSON，全选复制，选择"📝 粘贴文本"，粘贴即可。
-
-**Q8：材料库可以自己加材料吗？**
-A：可以。侧边栏"📚 材料库管理"里添加。
-
-**Q9：三点弯曲力为什么偏大？**
-A：工具的 My 是纯弹性理论值，忽略了 Brazier 椭圆化、σ_uts 偏差、层间滑移等。
-实际力可能只有工具值的 30%~60%。
-
-**Q10：EI 怎么转成 N？**
-A：不能直接转。要指定加载条件（跨距、位移、曲率）。详见第 3 节。
+**Q6：怎么让两个相邻段之间"无缝"？**
+A：让前一段的终半径 = 后一段的起半径。
     """)
 
 with st.expander("15. 物理背景与局限", expanded=False):
@@ -1695,6 +1794,8 @@ with st.expander("15. 物理背景与局限", expanded=False):
 **理论模型**：多层同心圆管、完全粘接、材料线弹性、小变形、Timoshenko 薄环理论。
 
 **主要简化**：忽略材料非线性、层间滑移、截面椭圆化、剪切变形、屈曲。
+
+**锥度段简化**：段内每个 x 处按当前半径计算，等同于局部准一维近似。
 
 **工具定位**：设计筛选工具，不是实验替代品。
     """)
@@ -1709,7 +1810,8 @@ st.session_state.x_pos = float(x_pos)
 
 all_schemes = []
 xs, EA_arr, EI_arr, Kp_arr, Fu_arr, My_arr, Fc_arr = compute_along_length(
-    structure, L_total, ea_correction, kp_correction, eta_bond, braid_crush_factor)
+    structure, L_total, ea_correction, kp_correction, eta_bond, braid_crush_factor,
+    collapse_model=collapse_model)
 all_schemes.append({
     'name': 'Current', 'xs': xs,
     'EA': EA_arr, 'EI': EI_arr, 'Kp': Kp_arr,
@@ -1718,15 +1820,17 @@ all_schemes.append({
     'params': {'name': 'Current', 'structure': structure, 'L_total': L_total,
                'ea_correction': ea_correction, 'kp_correction': kp_correction,
                'eta_bond': eta_bond, 'softening_c': softening_c,
-               'span_L': L_span, 'braid_crush_factor': braid_crush_factor}
+               'span_L': L_span, 'braid_crush_factor': braid_crush_factor,
+               'collapse_model': collapse_model}
 })
 
 for s in saved_schemes:
     try:
         s_bcf = s.get('braid_crush_factor', 1.0)
+        s_cm = s.get('collapse_model', 'weighted')
         s_xs, s_EA, s_EI, s_Kp, s_Fu, s_My, s_Fc = compute_along_length(
             s['structure'], s['L_total'], s['ea_correction'], s['kp_correction'],
-            s['eta_bond'], s_bcf)
+            s['eta_bond'], s_bcf, collapse_model=s_cm)
         all_schemes.append({
             'name': s['name'], 'xs': s_xs,
             'EA': s_EA, 'EI': s_EI, 'Kp': s_Kp,
@@ -1740,9 +1844,10 @@ layers = compute_at_x(structure, x_pos, eta_bond=eta_bond, braid_crush_factor=br
 
 def make_label(sch):
     p = sch['params']
+    cm_tag = '加权' if p.get('collapse_model', 'weighted') == 'weighted' else '最弱'
     if sch['is_current']:
-        return f"Current (Kp_corr={p['kp_correction']:.2f}, c={p['softening_c']:.2f})"
-    return f"{sch['name']} (Kp_corr={p['kp_correction']:.2f}, c={p['softening_c']:.2f})"
+        return f"Current [{cm_tag}] (Kp_corr={p['kp_correction']:.2f}, c={p['softening_c']:.2f})"
+    return f"{sch['name']} [{cm_tag}] (Kp_corr={p['kp_correction']:.2f}, c={p['softening_c']:.2f})"
 
 # ========== 刚度分析 ==========
 st.markdown("## 一、刚度分析")
@@ -1763,6 +1868,15 @@ else:
     tr_disp = (rn_disp - r0_disp) / R_disp if R_disp > 0 else 0.0
     const_eff_disp = compute_effective_const(tr_disp)
     st.caption(f"当前截面 t/R = **{tr_disp:.3f}** | const_eff = **{const_eff_disp:.4f}** | 模型：**{model_used}**")
+
+    _merged = merge_layers_for_crush(layers)
+    _merged_groups = [m for m in _merged if m.get('is_merged')]
+    if _merged_groups:
+        _notes = []
+        for m in _merged_groups:
+            _src = " + ".join([n for n in m['_merged_from'] if n])
+            _notes.append(f"{m['r_in']:.3f}~{m['r_out']:.3f} mm（{_src}）")
+        st.caption("🔗 抗压扁计算中已自动合并以下相邻同材料层：" + "；".join(_notes))
 
     st.subheader("刚度沿长度分布")
     if len(all_schemes) > 1:
@@ -1854,6 +1968,7 @@ else:
             p = sch['params']
             try:
                 s_bcf = p.get('braid_crush_factor', 1.0)
+                s_cm = p.get('collapse_model', 'weighted')
                 if sch['is_current']:
                     s_layers_cmp = layers
                 else:
@@ -1866,9 +1981,10 @@ else:
                     s_Fu_x, _ = compute_axial_strength(s_layers_cmp)
                     s_Fu_y_x, _, _, _ = compute_axial_yield(s_layers_cmp, p['ea_correction'])
                     s_My_x, _, _, _ = compute_bending_yield(s_layers_cmp)
-                    s_Fc_x, _, _, _ = compute_collapse_force(s_layers_cmp)
+                    s_Fc_x, _, _, _ = compute_collapse_force(s_layers_cmp, model=s_cm)
                     compare_rows.append({
                         '方案': sch['name'] + (' (当前)' if sch['is_current'] else ''),
+                        '抗压扁模型': '刚度加权' if s_cm == 'weighted' else '最弱层',
                         'Kp 修正': f"{p['kp_correction']:.2f}",
                         '软化系数 c': f"{p['softening_c']:.2f}",
                         '粘接系数 η': f"{p['eta_bond']:.2f}",
@@ -1959,13 +2075,15 @@ else:
 # ========== 强度分析 ==========
 st.markdown("---")
 st.markdown("## 二、强度分析")
-st.caption(f"弯曲按三点弯曲换算，跨距 L = {L_span:.1f} mm，位移截距 = {tp_offset_mm:.2f} mm，力截距 = {tp_offset_N:.2f} N。")
+st.caption(f"三点弯曲跨距 L = {L_span:.1f} mm，位移截距 = {tp_offset_mm:.2f} mm，力截距 = {tp_offset_N:.2f} N。"
+           f"抗压扁模型：**{'刚度加权' if collapse_model == 'weighted' else '最弱层控制'}**。")
 
 if layers:
     Fu, Fu_layer = compute_axial_strength(layers)
     Fu_y, ax_yield_ctrl, ax_yield_cands, ax_yield_contribs = compute_axial_yield(layers, ea_correction)
     My, bending_ctrl, bending_cands, bending_contribs = compute_bending_yield(layers)
-    Fc, collapse_ctrl, collapse_cands, collapse_contribs = compute_collapse_force(layers)
+    Fc, collapse_ctrl, collapse_cands, collapse_contribs = compute_collapse_force(
+        layers, model=collapse_model)
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("拉伸极限 Fu (N)", f"{Fu:.2f}")
@@ -1976,11 +2094,10 @@ if layers:
     ctrl_info = []
     if ax_yield_ctrl: ctrl_info.append(f"**拉伸屈服控制层**：{ax_yield_ctrl}")
     if bending_ctrl: ctrl_info.append(f"**弯曲屈服控制层**：{bending_ctrl}")
-    if collapse_ctrl: ctrl_info.append(f"**压扁屈服控制层**：{collapse_ctrl}")
+    if collapse_ctrl:
+        ctrl_info.append(f"**压扁屈服控制**：{collapse_ctrl}")
     if ctrl_info:
         st.info("。".join(ctrl_info) + "。")
-    else:
-        st.warning("没有层满足强度分析条件（需 σ_uts > 0 且 E > 0）。")
 
     st.subheader("拉伸起始屈服 — 各层贡献")
     ax_rows = []
@@ -2027,15 +2144,14 @@ if layers:
     st.dataframe(pd.DataFrame(b_rows), use_container_width=True)
 
     st.subheader("📐 三点弯曲弹性段计算器")
-    st.caption("输入一个下压距离，计算弹性段对应的力。公式：F = 48 · EI · δ / L³。超出屈服点后弹性公式会高估。")
+    st.caption("输入一个下压距离，计算弹性段对应的力。公式：F = 48 · EI · δ / L³。")
 
     col_d1, col_d2 = st.columns([1, 3])
     with col_d1:
         tp_delta_val = st.number_input(
             "下压距离 δ (mm)", min_value=0.0, max_value=100.0,
             value=float(st.session_state.tp_delta_input),
-            step=0.1, format="%.2f", key="tp_delta_input_widget",
-            help="输入实验的下压量，比如 0.1、0.5、1.0、5.0 等")
+            step=0.1, format="%.2f", key="tp_delta_input_widget")
         st.session_state.tp_delta_input = float(tp_delta_val)
     tp_delta = st.session_state.tp_delta_input
 
@@ -2054,11 +2170,11 @@ if layers:
         if delta_yield > 0:
             ratio = tp_delta / delta_yield
             if ratio < 0.8:
-                st.success(f"✅ **弹性段**：δ = {tp_delta:.2f} mm，约为屈服点位移 {delta_yield:.3f} mm 的 {ratio*100:.0f}%。弹性公式可信。")
+                st.success(f"✅ **弹性段**：δ = {tp_delta:.2f} mm，约为屈服点位移 {delta_yield:.3f} mm 的 {ratio*100:.0f}%。")
             elif ratio < 1.2:
-                st.warning(f"⚠️ **接近屈服点**：δ = {tp_delta:.2f} mm，约为屈服点位移 {delta_yield:.3f} mm 的 {ratio*100:.0f}%。弹性公式开始有偏差。")
+                st.warning(f"⚠️ **接近屈服点**：δ = {tp_delta:.2f} mm，约为屈服点位移 {delta_yield:.3f} mm 的 {ratio*100:.0f}%。")
             else:
-                st.error(f"❌ **超出弹性段**：δ = {tp_delta:.2f} mm，是屈服点位移 {delta_yield:.3f} mm 的 {ratio*100:.0f} 倍。弹性公式严重高估。")
+                st.error(f"❌ **超出弹性段**：δ = {tp_delta:.2f} mm，是屈服点位移 {delta_yield:.3f} mm 的 {ratio*100:.0f} 倍。")
 
         st.markdown("**多下压量对比**")
         compare_deltas = [0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0]
@@ -2138,7 +2254,7 @@ if layers:
     axes_t[1].grid(True); axes_t[1].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
     axes_t[1].legend(loc='best', fontsize=8)
     axes_t[2].set_ylabel('Collapse Force Fc (N)'); axes_t[2].set_xlabel('Axial position (mm)')
-    axes_t[2].set_title('Collapse Force (weakest layer controls)')
+    axes_t[2].set_title(f'Collapse Force ({collapse_model} model)')
     axes_t[2].grid(True); axes_t[2].axvline(x=x_pos, color='gray', linestyle='--', alpha=0.5)
     axes_t[2].legend(loc='best', fontsize=8)
     fig_t.tight_layout(rect=[0, 0, 1, 0.96])
@@ -2203,9 +2319,10 @@ with exp_col3:
                     '参数': ['导管总长度 (mm)', '当前轴向位置 (mm)', 'EA 修正系数',
                              'Kp 修正系数', '粘接系数 η', '三点弯曲跨距 (mm)',
                              '软化系数 c', '编织层压扁折减系数',
-                             '位移截距 (mm)', '力截距 (N)', '已保存方案数'],
+                             '位移截距 (mm)', '力截距 (N)', '抗压扁模型', '已保存方案数'],
                     '值': [L_total, x_pos, ea_correction, kp_correction, eta_bond, L_span,
                            softening_c, braid_crush_factor, tp_offset_mm, tp_offset_N,
+                           ('刚度加权' if collapse_model == 'weighted' else '最弱层控制'),
                            len(saved_schemes)]}
                 pd.DataFrame(overview_data).to_excel(writer, sheet_name='概览', index=False)
 
@@ -2324,6 +2441,7 @@ with exp_col3:
                         p = sch['params']
                         try:
                             s_bcf_e = p.get('braid_crush_factor', 1.0)
+                            s_cm_e = p.get('collapse_model', 'weighted')
                             if sch['is_current']:
                                 s_layers_export = layers
                             else:
@@ -2336,9 +2454,10 @@ with exp_col3:
                                 s_Fu_x, _ = compute_axial_strength(s_layers_export)
                                 s_Fu_y_x, _, _, _ = compute_axial_yield(s_layers_export, p['ea_correction'])
                                 s_My_x, _, _, _ = compute_bending_yield(s_layers_export)
-                                s_Fc_x, _, _, _ = compute_collapse_force(s_layers_export)
+                                s_Fc_x, _, _, _ = compute_collapse_force(s_layers_export, model=s_cm_e)
                                 compare_rows_export.append({
                                     '方案': sch['name'] + (' (当前)' if sch['is_current'] else ''),
+                                    '抗压扁模型': '刚度加权' if s_cm_e == 'weighted' else '最弱层',
                                     'Kp 修正系数': p['kp_correction'],
                                     '软化系数 c': p['softening_c'],
                                     '粘接系数 η': p['eta_bond'],
